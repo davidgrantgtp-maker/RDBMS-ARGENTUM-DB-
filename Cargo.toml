@@ -1,0 +1,22 @@
+[workspace]
+members = [
+    "crates/aether-common",
+    "crates/aether-storage",
+    "crates/aether-index",
+    "crates/aether-engine",
+    "crates/aether-server",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["AETHER DB Team"]
+license = "Apache-2.0"
+repository = "https://github.com/aether-db/aether"
+
+[workspace.dependencies]
+aether-common = { path = "crates/aether-common" }
+aether-storage = { path = "crates/aether-storage" }
+aether-index = { path = "crates/aether-index" }
+aether-engine = { path = "crates/aether-engine" }

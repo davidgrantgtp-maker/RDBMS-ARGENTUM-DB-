@@ -1,0 +1,362 @@
+//! crates/aether-server/src/main.rs - Demo CLI AETHER DB v2 BILINGÜE ES/EN
+use aether_engine::{Database, Row, Value};
+use aether_index::{SearchParams, TrinityIndex};
+use aether_storage::buffer_pool::BufferPool;
+use aether_storage::wal::WalManager;
+use std::sync::Arc;
+
+struct Lcg(u64);
+impl Lcg {
+    fn new(seed: u64) -> Self { Self(seed) }
+    fn next_u32(&mut self) -> u32 { self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1); (self.0 >> 32) as u32 }
+    fn next_f32(&mut self) -> f32 { (self.next_u32() as f32 / u32::MAX as f32) * 2.0 - 1.0 }
+}
+fn hash_str(s: &str) -> u64 { let mut h: u64 = 14695981039346656037; for b in s.bytes(){ h ^= b as u64; h = h.wrapping_mul(1099511628211);} h }
+fn embed(text: &str, dim: usize) -> Vec<f32> { let mut rng = Lcg::new(hash_str(text)); (0..dim).map(|_| rng.next_f32()).collect() }
+
+fn print_help() {
+    println!("AETHER DB v2.0 BILINGÜE - Motor TRINITY + SQL ES/EN");
+    println!();
+    println!("USO:");
+    println!("  cargo run -p aether-server -- --demo        Demo TRINITY + Demo SQL EN + Demo SQL ES");
+    println!("  cargo run -p aether-server -- --demo-sql    Demo SQL completa (EN)");
+    println!("  cargo run -p aether-server -- --demo-es     Demo SQL en ESPAÑOL (traducción)");
+    println!("  cargo run -p aether-server -- --repl        REPL BILINGÜE ES/EN");
+    println!("  cargo run -p aether-server -- --help");
+    println!();
+    println!("TRADUCCIÓN DE COMANDOS (EN -> ES) - Costo: BAJO, parser bilingüe sin romper compatibilidad:");
+    println!("  CREATE        -> CREA");
+    println!("  TABLE         -> TABLA        (CREATE TABLE -> CREA TABLA)");
+    println!("  ALTER TABLE   -> CAMBIA TABLA (también ALTERA TABLA)");
+    println!("  DROP TABLE    -> BORRA TABLA");
+    println!("  INSERT        -> AGREGAR      (INSERT INTO t VALUES -> AGREGAR EN t VALORES)");
+    println!("  UPDATE        -> ACTUALIZA    (UPDATE SET -> ACTUALIZA ESTABLECE/FIJA)");
+    println!("  DELETE        -> BORRAR       (DELETE FROM t WHERE -> BORRAR DE t DONDE)");
+    println!("  SELECT        -> ELIGE        (SELECT * FROM -> ELIGE * DE)");
+    println!("  SEARCH        -> BUSCA        (SEARCH * IN -> BUSCA * EN)");
+    println!("  ORDER BY      -> ORDENA POR");
+    println!("  GROUP BY      -> AGRUPA POR");
+    println!("  LIMIT         -> LIMITE");
+    println!("  COUNT         -> CUENTA       (COUNT(*) -> CUENTA(*))");
+    println!("  WHERE         -> DONDE");
+    println!("  FROM          -> DE / DESDE / EN");
+    println!("  SET           -> ESTABLECE / FIJA");
+    println!("  ADD COLUMN    -> AGREGA COLUMNA");
+    println!("  DROP COLUMN   -> BORRA COLUMNA");
+    println!("  STATS         -> ESTADO       (REPL)");
+    println!("  DESCRIBE      -> MUESTRA ESTRUCTURA / DESCRIBE / ESTRUCTURA / ESQUEMA");
+    println!("                  Ej: MUESTRA TABLA t / DESCRIBE TABLA t / ESTRUCTURA t / MUESTRA ESTRUCTURA DE TABLA t");
+    println!("  IDENTITY      -> IDENTIDAD / AUTOINCREMENTAL (GENERATED ALWAYS AS IDENTITY -> GENERADO SIEMPRE COMO IDENTIDAD)");
+    println!("  SERIAL        -> SERIAL (alias, igual en ES)");
+    println!("  AUTOINCREMENT -> AUTOINCREMENTAL");
+    println!();
+    println!("EJEMPLOS BILINGÜES:");
+    println!("  EN: CREATE TABLE productos (id INT, nombre TEXT)");
+    println!("  ES: CREA TABLA productos (id INT, nombre TEXT)");
+    println!("  EN: CREATE TABLE t (id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, nombre TEXT)");
+    println!("  ES: CREA TABLA t (id INT GENERADO SIEMPRE COMO IDENTIDAD PRIMARY KEY, nombre TEXT)");
+    println!("  EN: CREATE TABLE t (id SERIAL PRIMARY KEY, nombre TEXT)  -- alias");
+    println!("  ES: CREA TABLA t (id SERIAL PRIMARY KEY, nombre TEXT)");
+    println!("  EN: INSERT INTO t (nombre) VALUES ('Zapatilla')  -- id autogenerado");
+    println!("  ES: AGREGAR EN t (nombre) VALORES ('Zapatilla')");
+    println!("  EN: SELECT * FROM productos WHERE cat=5 ORDER BY nombre ASC LIMIT 5");
+    println!("  ES: ELIGE * DE productos DONDE cat=5 ORDENA POR nombre ASC LIMITE 5");
+    println!("  EN: SELECT cat, COUNT(*) FROM t GROUP BY cat ORDER BY COUNT(*) DESC LIMIT 5");
+    println!("  ES: ELIGE cat, CUENTA(*) DE t AGRUPA POR cat ORDENA POR CUENTA(*) DESC LIMITE 5");
+    println!("  EN: SEARCH * IN productos WHERE cat=5 LIMIT 5");
+    println!("  ES: BUSCA * EN productos DONDE cat=5 LIMITE 5");
+    println!("  EN: UPDATE t SET nombre='x' WHERE id=1");
+    println!("  ES: ACTUALIZA t ESTABLECE nombre='x' DONDE id=1");
+    println!("  EN: INSERT INTO t (id, nombre) VALUES (1, 'Zapatilla')");
+    println!("  ES: AGREGAR EN t (id, nombre) VALORES (1, 'Zapatilla')");
+    println!("  EN: DELETE FROM t WHERE id=1");
+    println!("  ES: BORRAR DE t DONDE id=1");
+    println!("  EN: DESCRIBE TABLE t  /  SHOW TABLE t");
+    println!("  ES: MUESTRA TABLA t  /  DESCRIBE TABLA t  /  ESTRUCTURA t  /  MUESTRA ESTRUCTURA DE TABLA t");
+}
+
+fn run_trinity_demo() -> std::io::Result<()> {
+    println!("=== AETHER DB --demo TRINITY ===");
+    let wal_path = std::env::temp_dir().join(format!("aether_demo_{}.wal", std::process::id()));
+    let _ = std::fs::remove_file(&wal_path);
+    let wal = WalManager::open(wal_path.to_str().unwrap()).unwrap();
+    let bp = Arc::new(BufferPool::new(128));
+    let mut idx = TrinityIndex::new(bp.clone(), wal.clone());
+    let productos = vec![
+        (1, "Zapatilla Trail Pro", "Zapatilla impermeable Gore-Tex para trail running en lluvia intensa", 5),
+        (2, "Zapatilla Urban Light", "Zapatilla ligera de cuero para ciudad, no impermeable", 5),
+        (3, "Bota Montaña GTX", "Bota impermeable de montaña con membrana Gore-Tex", 5),
+        (4, "Sandalia Verano", "Sandalia abierta transpirable para verano", 5),
+        (5, "Campera Impermeable", "Campera impermeable con costuras selladas", 6),
+        (6, "Mochila Trail 30L", "Mochila trail con funda impermeable incluida", 6),
+        (7, "Reloj GPS Runner", "Reloj con GPS para running y trail", 7),
+        (8, "Medias Técnicas", "Medias de compresión para trail", 7),
+        (9, "Lentes Sol Sport", "Lentes para running en montaña", 7),
+        (10, "Bastones Trekking", "Bastones de trekking plegables", 7),
+    ];
+    println!("-- INSERT 10 productos --");
+    for (id, nombre, desc, cat) in &productos {
+        let vector = embed(&format!("{} {}", nombre, desc), 768);
+        let row = format!("{}|{}|cat={}", nombre, desc, cat);
+        let csr = (*cat as u32).to_le_bytes().to_vec();
+        let pq_dummy = &vector[..2].iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>()[..8];
+        let mut payload = Vec::new();
+        aether_storage::page::TrinityPayload::serialize(row.as_bytes(), pq_dummy, desc.as_bytes(), &csr, &mut payload);
+        let lsn = wal.append(aether_storage::WalRecord::TrinityInsert{ txn_id: *id as u64, lsn: 0, page_id: 1, slot_id: 0, payload, prev_lsn: 0 }).unwrap();
+        let slot = idx.insert(1, row.as_bytes(), &vector, desc.as_bytes(), &csr, *id as u64, lsn).unwrap();
+        println!("  INSERT/AGREGAR id={} '{}' slot={} LSN={}", id, nombre, slot, lsn);
+    }
+    wal.group_commit().unwrap();
+    println!("Stats/Estado: {} tuplas, {} páginas, WAL LSN={}\n", idx.num_tuples, idx.num_pages, wal.flushed_lsn());
+    let qvec = embed("zapatilla para correr bajo lluvia intensa trail", 768);
+    let params = SearchParams{ query_vector: Some(qvec), query_text: None, top_k: 5, ef_search: 64, alpha_bm25: 0.0, alpha_vector: 1.0, txn_snapshot: (0,1000,vec![]) };
+    println!("-- SELECT/BUSCA vector Top5 --");
+    for (i,r) in idx.search(&params).iter().enumerate(){
+        let nombre = productos.get(r.slot_id as usize).map(|p| p.1).unwrap_or("?");
+        println!(" {}. ELIGE/BUSCA slot={} -> {}", i+1, r.slot_id, nombre);
+    }
+    println!("\n=== TRINITY Demo OK WAL {} ({} bytes) ===\n", wal_path.display(), std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0));
+    let _ = std::fs::remove_file(&wal_path);
+    Ok(())
+}
+
+fn run_demo_sql() -> std::io::Result<()> {
+    println!("=== AETHER DB --demo-sql EN (SQL Inglés) ===\n");
+    let wal_path = std::env::temp_dir().join(format!("aether_demo_sql_{}.wal", std::process::id()));
+    let cat_path = std::env::temp_dir().join(format!("aether_catalog_{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&wal_path);
+    let _ = std::fs::remove_file(&cat_path);
+    let wal = WalManager::open(wal_path.to_str().unwrap()).unwrap();
+    let bp = Arc::new(BufferPool::new(128));
+    let trinity = TrinityIndex::new(bp.clone(), wal.clone());
+    let db = Database::new(wal.clone(), bp.clone(), trinity, Some(cat_path.to_str().unwrap().into()));
+    let exec = |sql: &str| {
+        println!("> {}", sql);
+        match aether_engine::parser::parse(sql) {
+            Ok(plan) => match db.execute(plan) { Ok(res) => println!("{}\n", res.to_display()), Err(e) => println!("Error: {}\n", e), },
+            Err(e) => println!("Error parse: {}\n", e),
+        }
+    };
+    exec("CREATE TABLE productos (id INT PRIMARY KEY, nombre TEXT, descripcion TEXT, categoria_id INT, embedding VECTOR(768))");
+    exec("DESCRIBE TABLE productos");
+    exec("MUESTRA ESTRUCTURA DE TABLA productos");
+    println!("-- INSERT 6 filas --");
+    for (id, nombre, desc, cat) in vec![(1, "Zapatilla Trail Pro", "impermeable gore-tex", 5),(2, "Zapatilla Urban Light", "cuero ciudad", 5),(3, "Bota Montaña GTX", "impermeable montaña", 5),(4, "Campera Impermeable", "costuras selladas", 6),(5, "Mochila Trail 30L", "funda impermeable", 6),(6, "Reloj GPS", "running trail", 7)] {
+        let mut row = Row::new();
+        row.insert("id".into(), Value::Int(id));
+        row.insert("nombre".into(), Value::Text(nombre.into()));
+        row.insert("descripcion".into(), Value::Text(desc.into()));
+        row.insert("categoria_id".into(), Value::Int(cat));
+        row.insert("embedding".into(), Value::Vector(embed(&format!("{} {}", nombre, desc), 768)));
+        db.insert_row("productos", row).unwrap();
+        println!("  INSERT id={} {}", id, nombre);
+    }
+    println!();
+    exec("SELECT * FROM productos LIMIT 10");
+    exec("SELECT * FROM productos WHERE categoria_id = 5 ORDER BY nombre ASC LIMIT 5");
+    exec("SELECT categoria_id, COUNT(*) FROM productos GROUP BY categoria_id ORDER BY COUNT(*) DESC LIMIT 5");
+    exec("SELECT COUNT(*) FROM productos WHERE categoria_id = 5");
+    exec("UPDATE productos SET nombre = 'Zapatilla Pro v2', embedding = EMBED('zapatilla trail pro v2 impermeable') WHERE id = 1");
+    exec("SELECT * FROM productos WHERE id = 1");
+    exec("ALTER TABLE productos ADD COLUMN precio FLOAT");
+    exec("UPDATE productos SET precio = 199.99 WHERE id = 1");
+    exec("SELECT nombre, precio FROM productos ORDER BY precio DESC LIMIT 5");
+    exec("ALTER TABLE productos DROP COLUMN precio");
+    exec("SEARCH * IN productos WHERE categoria_id = 5 LIMIT 5");
+    // 9b IDENTITY demo EN
+    println!("-- Demo IDENTITY AUTOINCREMENTAL (EN) --");
+    exec("CREATE TABLE productos_auto (id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, nombre TEXT)");
+    exec("DESCRIBE TABLE productos_auto");
+    exec("INSERT INTO productos_auto (nombre) VALUES ('Zapatilla')");
+    exec("INSERT INTO productos_auto (nombre) VALUES ('Bota')");
+    exec("INSERT INTO productos_auto (id, nombre) VALUES (DEFAULT, 'Sandalia')");
+    exec("SELECT * FROM productos_auto ORDER BY id ASC");
+    exec("INSERT INTO productos_auto (id, nombre) VALUES (99, 'Falla siempre')"); // debe fallar ALWAYS
+    exec("DROP TABLE productos_auto");
+    // Alias SERIAL
+    exec("CREATE TABLE t_serial (id SERIAL PRIMARY KEY, nombre TEXT)");
+    exec("DESCRIBE TABLE t_serial");
+    exec("INSERT INTO t_serial (nombre) VALUES ('a')");
+    exec("INSERT INTO t_serial (nombre) VALUES ('b')");
+    exec("SELECT * FROM t_serial ORDER BY id ASC");
+    exec("DROP TABLE t_serial");
+    exec("DROP TABLE productos");
+    let _ = std::fs::remove_file(&wal_path);
+    let _ = std::fs::remove_file(&cat_path);
+    println!("=== Demo SQL EN OK ===\n");
+    Ok(())
+}
+
+fn run_demo_es() -> std::io::Result<()> {
+    println!("=== AETHER DB --demo-es ES (SQL Español 100% traducido) ===\n");
+    let wal_path = std::env::temp_dir().join(format!("aether_demo_es_{}.wal", std::process::id()));
+    let cat_path = std::env::temp_dir().join(format!("aether_catalog_es_{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&wal_path);
+    let _ = std::fs::remove_file(&cat_path);
+    let wal = WalManager::open(wal_path.to_str().unwrap()).unwrap();
+    let bp = Arc::new(BufferPool::new(128));
+    let trinity = TrinityIndex::new(bp.clone(), wal.clone());
+    let db = Database::new(wal.clone(), bp.clone(), trinity, Some(cat_path.to_str().unwrap().into()));
+    let exec = |sql: &str| {
+        println!("> {}", sql);
+        match aether_engine::parser::parse(sql) {
+            Ok(plan) => match db.execute(plan) { Ok(res) => println!("{}\n", res.to_display()), Err(e) => println!("Error: {}\n", e), },
+            Err(e) => println!("Error parse: {}\n", e),
+        }
+    };
+    // Mismos tests pero en español
+    exec("CREA TABLA productos (id INT PRIMARY KEY, nombre TEXT, descripcion TEXT, categoria_id INT, embedding VECTOR(768))");
+    exec("MUESTRA TABLA productos");
+    exec("ESTRUCTURA productos");
+    exec("DESCRIBE TABLE productos");
+    // AGREGAR EN ... VALORES
+    exec("AGREGAR EN productos (id, nombre, descripcion, categoria_id) VALORES (1, 'Zapatilla Trail Pro', 'impermeable gore-tex', 5)");
+    exec("AGREGAR EN productos (id, nombre, descripcion, categoria_id) VALORES (2, 'Zapatilla Urban Light', 'cuero ciudad', 5)");
+    exec("AGREGAR EN productos (id, nombre, descripcion, categoria_id) VALORES (3, 'Bota Montaña GTX', 'impermeable montaña', 5)");
+    exec("AGREGAR EN productos (id, nombre, descripcion, categoria_id) VALORES (4, 'Campera Impermeable', 'costuras selladas', 6)");
+    // ELIGE
+    exec("ELIGE * DE productos LIMITE 10");
+    exec("ELIGE * DE productos DONDE categoria_id = 5 ORDENA POR nombre ASC LIMITE 5");
+    exec("ELIGE categoria_id, CUENTA(*) DE productos AGRUPA POR categoria_id ORDENA POR CUENTA(*) DESC LIMITE 5");
+    exec("ELIGE CUENTA(*) DE productos DONDE categoria_id = 5");
+    exec("ELIGE CUENTA(categoria_id) DE productos");
+    // ACTUALIZA
+    exec("ACTUALIZA productos ESTABLECE nombre = 'Zapatilla Pro v2' DONDE id = 1");
+    exec("ELIGE * DE productos DONDE id = 1");
+    // CAMBIA TABLA
+    exec("CAMBIA TABLA productos AGREGA COLUMNA precio FLOAT");
+    exec("ACTUALIZA productos ESTABLECE precio = 199.99 DONDE id = 1");
+    exec("ELIGE nombre, precio DE productos ORDENA POR precio DESC LIMITE 5");
+    exec("CAMBIA TABLA productos BORRA COLUMNA precio");
+    // Demo IDENTIDAD ES
+    println!("-- Demo IDENTIDAD AUTOINCREMENTAL (ES) --");
+    exec("CREA TABLA productos_auto (id INT GENERADO SIEMPRE COMO IDENTIDAD PRIMARY KEY, nombre TEXT)");
+    exec("MUESTRA TABLA productos_auto");
+    exec("AGREGAR EN productos_auto (nombre) VALORES ('Zapatilla')");
+    exec("AGREGAR EN productos_auto (nombre) VALORES ('Bota')");
+    exec("AGREGAR EN productos_auto (id, nombre) VALORES (DEFAULT, 'Sandalia')");
+    exec("ELIGE * DE productos_auto ORDENA POR id ASC");
+    exec("AGREGAR EN productos_auto (id, nombre) VALORES (99, 'Falla siempre')"); // debe fallar ALWAYS
+    exec("BORRA TABLA productos_auto");
+    exec("CREA TABLA t_serial (id SERIAL PRIMARY KEY, nombre TEXT)");
+    exec("MUESTRA TABLA t_serial");
+    exec("AGREGAR EN t_serial (nombre) VALORES ('a')");
+    exec("AGREGAR EN t_serial (nombre) VALORES ('b')");
+    exec("ELIGE * DE t_serial ORDENA POR id ASC");
+    exec("BORRA TABLA t_serial");
+    // BUSCA
+    exec("BUSCA * EN productos DONDE categoria_id = 5 LIMITE 5");
+    exec("BUSCA * EN productos LIMITE 3");
+    // BORRAR
+    exec("BORRAR DE productos DONDE id = 2");
+    exec("ELIGE * DE productos LIMITE 10");
+    exec("BORRA TABLA productos");
+    let _ = std::fs::remove_file(&wal_path);
+    let _ = std::fs::remove_file(&cat_path);
+    println!("=== Demo SQL ES OK ===\n");
+    Ok(())
+}
+
+fn run_repl() -> std::io::Result<()> {
+    use std::io::{self, Write};
+    println!("AETHER DB REPL v2.0 BILINGÜE ES/EN - HELP/AYUDA para ayuda, EXIT/SALIR para salir");
+    let wal_path = std::env::temp_dir().join(format!("aether_repl_{}.wal", std::process::id()));
+    let cat_path = std::env::temp_dir().join(format!("aether_repl_cat_{}.txt", std::process::id()));
+    let wal = WalManager::open(wal_path.to_str().unwrap()).unwrap();
+    let bp = Arc::new(BufferPool::new(128));
+    let trinity = TrinityIndex::new(bp.clone(), wal.clone());
+    let db = Database::new(wal.clone(), bp.clone(), trinity, Some(cat_path.to_str().unwrap().into()));
+    let _ = aether_engine::parser::parse("CREATE TABLE productos (id INT PRIMARY KEY, nombre TEXT, descripcion TEXT, categoria_id INT, embedding VECTOR(768))").map(|p| db.execute(p));
+    let mut trinity_legacy = TrinityIndex::new(bp.clone(), wal.clone());
+    let mut next_id: u64 = 100;
+    loop {
+        print!("aether> ");
+        io::stdout().flush().unwrap();
+        let mut line = String::new();
+        if io::stdin().read_line(&mut line).is_err() { break; }
+        let cmd = line.trim();
+        if cmd.is_empty() { continue; }
+        let up = cmd.to_uppercase();
+        if up == "EXIT" || up == "SALIR" || up == "QUIT" || up == "\\Q" { break; }
+        if up == "HELP" || up == "AYUDA" {
+            println!("SQL BILINGÜE:");
+            println!("  CREA TABLA / CREATE TABLE  |  CAMBIA TABLA / ALTER TABLE  |  BORRA TABLA / DROP TABLE");
+            println!("  AGREGAR EN / INSERT INTO   |  ACTUALIZA / UPDATE  |  BORRAR DE / DELETE FROM");
+            println!("  ELIGE / SELECT  |  BUSCA / SEARCH  |  CUENTA / COUNT");
+            println!("  MUESTRA TABLA / DESCRIBE TABLE / ESTRUCTURA / ESQUEMA  (ver estructura)");
+            println!("  Ej: CREA TABLA t (id INT, nombre TEXT)");
+            println!("  Ej: MUESTRA TABLA t  /  DESCRIBE TABLA t  /  ESTRUCTURA t  /  MUESTRA ESTRUCTURA DE TABLA t");
+            println!("  Ej: ELIGE * DE t DONDE cat=5 ORDENA POR nombre ASC LIMITE 5");
+            println!("  Ej: ELIGE cat, CUENTA(*) DE t AGRUPA POR cat ORDENA POR CUENTA(*) DESC LIMITE 5");
+            println!("  Ej: BUSCA * EN t DONDE cat=5 LIMITE 5");
+            println!("  Ej: AGREGAR EN t (id, nombre) VALORES (1, 'Zapatilla')");
+            println!("  Ej: ACTUALIZA t ESTABLECE nombre='x' DONDE id=1");
+            println!("  Ej: BORRAR DE t DONDE id=1");
+            println!("REPL corto:");
+            println!("  INSERT <nombre> | <desc> | <cat>  o  AGREGAR <nombre> | <desc> | <cat>");
+            println!("  SEARCH <texto>  o  BUSCA <texto>");
+            println!("  STATS / ESTADO");
+            println!("  ESTRUCTURA <tabla> / MUESTRA TABLA <tabla> / DESCRIBE <tabla>");
+            continue;
+        }
+        if up == "STATS" || up == "ESTADO" {
+            let cat = db.catalog.read().unwrap();
+            println!("Tablas: {}", cat.list_tables().iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", "));
+            let data = db.data.read().unwrap();
+            for (tbl, rows) in data.iter() { println!("  {}: {} filas", tbl, rows.len()); }
+            println!("Trinity: {} tuplas {} páginas", trinity_legacy.num_tuples, trinity_legacy.num_pages);
+            continue;
+        }
+        if (up.starts_with("INSERT ") || up.starts_with("AGREGAR ") || up.starts_with("AGREGA ")) && !up.starts_with("INSERT INTO") && !up.starts_with("AGREGAR EN") {
+            let payload = if up.starts_with("INSERT ") { &cmd[7..] } else if up.starts_with("AGREGAR ") { &cmd[8..] } else { &cmd[7..] };
+            if payload.contains('|') {
+                let parts: Vec<&str> = payload.split('|').collect();
+                if parts.len() != 3 { println!("Uso: INSERT <nombre> | <desc> | <cat>  o  AGREGAR <nombre> | <desc> | <cat>"); continue; }
+                let nombre = parts[0].trim(); let desc = parts[1].trim(); let cat: i64 = parts[2].trim().parse().unwrap_or(5);
+                let mut row = Row::new();
+                row.insert("id".into(), Value::Int(next_id as i64));
+                row.insert("nombre".into(), Value::Text(nombre.into()));
+                row.insert("descripcion".into(), Value::Text(desc.into()));
+                row.insert("categoria_id".into(), Value::Int(cat));
+                row.insert("embedding".into(), Value::Vector(embed(&format!("{} {}", nombre, desc), 768)));
+                match db.insert_row("productos", row) {
+                    Ok(_) => println!("OK AGREGAR id={} (SQL)", next_id),
+                    Err(e) => {
+                        let vec = embed(&format!("{} {}", nombre, desc), 768);
+                        let row2 = format!("{}|{}|cat={}", nombre, desc, cat);
+                        let slot = trinity_legacy.insert(1, row2.as_bytes(), &vec, desc.as_bytes(), &(cat as u32).to_le_bytes(), next_id, 0).unwrap();
+                        println!("OK id={} slot={} (TRINITY) - {}", next_id, slot, e);
+                    }
+                }
+                next_id += 1;
+                continue;
+            }
+        }
+        if (up.starts_with("SEARCH ") || up.starts_with("BUSCA ") || up.starts_with("BUSCAR ")) && !up.starts_with("SEARCH *") && !up.starts_with("BUSCA *") {
+            let q = if up.starts_with("SEARCH ") { &cmd[7..] } else if up.starts_with("BUSCA ") { &cmd[6..] } else { &cmd[7..] };
+            let qvec = embed(q, 768);
+            let params = SearchParams{ query_vector: Some(qvec), query_text: Some(q.to_string()), top_k: 5, ef_search: 64, alpha_bm25: 0.4, alpha_vector: 0.6, txn_snapshot: (0,1000,vec![]) };
+            let res = trinity_legacy.search(&params);
+            if res.is_empty() { println!("(sin resultados)"); } else { for (i,r) in res.iter().enumerate(){ println!("{}. BUSCA/SEARCH slot={} score={:.4}", i+1, r.slot_id, r.score_fused); } }
+            continue;
+        }
+        match aether_engine::parser::parse(cmd) {
+            Ok(plan) => match db.execute(plan) { Ok(res) => println!("{}", res.to_display()), Err(e) => println!("Error: {}", e), },
+            Err(e) => println!("Error parse: {} (HELP/AYUDA)", e),
+        }
+    }
+    let _ = std::fs::remove_file(&wal_path);
+    let _ = std::fs::remove_file(&cat_path);
+    println!("¡Hasta luego! / Bye.");
+    Ok(())
+}
+
+fn main() -> std::io::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 1 || args.iter().any(|a| a == "--help" || a == "-h") { print_help(); return Ok(()); }
+    if args.iter().any(|a| a == "--demo") { run_trinity_demo()?; run_demo_sql()?; run_demo_es()?; return Ok(()); }
+    if args.iter().any(|a| a == "--demo-sql") { return run_demo_sql(); }
+    if args.iter().any(|a| a == "--demo-es") { return run_demo_es(); }
+    if args.iter().any(|a| a == "--repl") { return run_repl(); }
+    eprintln!("Opción desconocida. Usa --help"); std::process::exit(1);
+}

@@ -1,0 +1,9 @@
+[package]
+name = "aether-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aether-common = { workspace = true }
+aether-storage = { workspace = true }
+aether-index = { workspace = true }

@@ -1,0 +1,7 @@
+[package]
+name = "aether-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aether-common = { workspace = true }
