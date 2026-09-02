@@ -263,7 +263,7 @@ impl Catalog {
         }
     }
 
-    fn persist(&self) {
+    pub fn persist(&self) {
         if let Some(path) = &self.persist_path {
             let mut out = String::new();
             out.push_str("{\n");
@@ -346,7 +346,7 @@ impl Catalog {
                 let mut tables_json = String::new();
                 if let Some(seq_pos) = content[tables_content_start..].find("\"sequences\"") {
                     // El array termina antes de ,"sequences"
-                    let before_seq = &content[tables_content_start..tables_start + seq_pos + content[tables_start..].find("\"sequences\"").unwrap_or(0)];
+                    let _before_seq = &content[tables_content_start..tables_start + seq_pos + content[tables_start..].find("\"sequences\"").unwrap_or(0)];
                     // Simplificado: extraer entre [ y ] que corresponde a tables
                     // Buscar el último "]" antes de "\"sequences\""
                     if let Some(last_bracket) = content[..content.find("\"sequences\"").unwrap_or(content.len())].rfind(']') {

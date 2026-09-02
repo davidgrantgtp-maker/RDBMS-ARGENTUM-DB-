@@ -277,6 +277,7 @@ impl Database {
             trinity: Arc::new(RwLock::new(trinity)),
             wal,
             buffer_pool,
+            heap_path: None,
             next_txn: std::sync::atomic::AtomicU64::new(1),
         }
     }
@@ -435,7 +436,7 @@ impl Database {
                                             // Texto
                                             let mut end = 1;
                                             let mut esc2 = false;
-                                            let mut in_s2 = true;
+                                            let in_s2 = true;
                                             for (j, ch) in val_trim[1..].char_indices() {
                                                 if esc2 { esc2 = false; continue; }
                                                 if ch == '\\' { esc2 = true; continue; }
@@ -545,6 +546,7 @@ impl Database {
             let mut data = self.data.write().unwrap();
             data.insert(table.to_lowercase(), Vec::new());
         }
+        self.persist_heap();
         self.wal.append(WalRecord::Commit { txn_id: txn, lsn: 0 }).map_err(|e| e.to_string())?;
         let _ = lsn;
         Ok(ExecutionResult::Created { table })
@@ -566,6 +568,7 @@ impl Database {
                 }
             }
         }
+        self.persist_heap();
         Ok(ExecutionResult::Altered { table })
     }
 
@@ -587,6 +590,7 @@ impl Database {
                 }
             }
         }
+        self.persist_heap();
         Ok(ExecutionResult::Altered { table })
     }
 
@@ -601,6 +605,7 @@ impl Database {
             let mut data = self.data.write().unwrap();
             data.remove(&table.to_lowercase());
         }
+        self.persist_heap();
         Ok(ExecutionResult::Dropped { table })
     }
 
