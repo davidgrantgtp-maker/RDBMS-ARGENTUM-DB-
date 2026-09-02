@@ -15,17 +15,25 @@ fn hash_str(s: &str) -> u64 { let mut h: u64 = 14695981039346656037; for b in s.
 fn embed(text: &str, dim: usize) -> Vec<f32> { let mut rng = Lcg::new(hash_str(text)); (0..dim).map(|_| rng.next_f32()).collect() }
 
 fn print_help() {
-    println!("AETHER DB v2.0 BILINGÜE - Motor TRINITY + SQL ES/EN");
+    println!("Argentum DB v3.0 BILINGÜE - Motor TRINITY + SQL ES/EN + multi-base");
     println!();
     println!("USO:");
-    println!("  cargo run -p aether-server -- --demo        Demo TRINITY + Demo SQL EN + Demo SQL ES");
-    println!("  cargo run -p aether-server -- --demo-sql    Demo SQL completa (EN)");
-    println!("  cargo run -p aether-server -- --demo-es     Demo SQL en ESPAÑOL (traducción)");
-    println!("  cargo run -p aether-server -- --repl        REPL BILINGÜE ES/EN");
-    println!("  cargo run -p aether-server -- --help");
+    println!("  cargo run -p argentum-server -- --demo        Demo TRINITY + Demo SQL EN + Demo SQL ES");
+    println!("  cargo run -p argentum-server -- --demo-sql    Demo SQL completa (EN)");
+    println!("  cargo run -p argentum-server -- --demo-es     Demo SQL en ESPAÑOL (traducción)");
+    println!("  cargo run -p argentum-server -- --repl        REPL BILINGÜE ES/EN con multi-base");
+    println!("  cargo run -p argentum-server -- --help");
+    println!();
+    println!("BASES DE DATOS / DATABASES (multi-base en REPL):");
+    println!("  CREATE DATABASE / CREA BASE          Crear base");
+    println!("  DROP DATABASE   / BORRA BASE         Borrar base");
+    println!("  USE DATABASE    / USA BASE           Cambiar de base");
+    println!("  SHOW DATABASES  / MUESTRA BASES      Listar bases (* = activa)");
+    println!("  Nota: 'default' siempre existe y no se puede borrar.");
     println!();
     println!("TRADUCCIÓN DE COMANDOS (EN -> ES) - Costo: BAJO, parser bilingüe sin romper compatibilidad:");
     println!("  CREATE        -> CREA");
+    println!("  DATABASE      -> BASE          (CREATE DATABASE -> CREA BASE / CREA BASE DE DATOS)");
     println!("  TABLE         -> TABLA        (CREATE TABLE -> CREA TABLA)");
     println!("  ALTER TABLE   -> CAMBIA TABLA (también ALTERA TABLA)");
     println!("  DROP TABLE    -> BORRA TABLA");
@@ -257,20 +265,72 @@ fn run_demo_es() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Render prompt con nombre de base actual.
+fn repl_prompt(current_db: &str) {
+    use std::io::Write;
+    print!("argentum[{}]> ", current_db);
+    let _ = std::io::stdout().flush();
+}
+
+fn handle_db_plan(mgr: &mut argentum_engine::DatabaseManager, plan: &argentum_engine::LogicalPlan) -> Option<String> {
+    use argentum_engine::LogicalPlan;
+    match plan {
+        LogicalPlan::CreateDatabase { name } => match mgr.create_database(name) {
+            Ok(_) => Some(format!("Base '{}' creada / database created", name)),
+            Err(e) => Some(format!("Error: {}", e)),
+        },
+        LogicalPlan::DropDatabase { name } => match mgr.drop_database(name) {
+            Ok(_) => Some(format!("Base '{}' borrada / database dropped", name)),
+            Err(e) => Some(format!("Error: {}", e)),
+        },
+        LogicalPlan::UseDatabase { name } => match mgr.use_database(name) {
+            Ok(_) => Some(format!("Usando base '{}' / switched to database '{}'", name, name)),
+            Err(e) => Some(format!("Error: {}", e)),
+        },
+        LogicalPlan::ShowDatabases => {
+            let dbs = mgr.show_databases();
+            let mut s = String::from("Bases de datos / Databases:\n");
+            for d in &dbs {
+                let marker = if d == mgr.current_db() { "* " } else { "  " };
+                s.push_str(&format!("{}{}\n", marker, d));
+            }
+            s.push_str(&format!("(* = activa / current)\n({} total)", dbs.len()));
+            Some(s)
+        }
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
 fn run_repl() -> std::io::Result<()> {
+    run_repl_with_dir(None)
+}
+
+fn run_repl_with_dir(data_dir: Option<&str>) -> std::io::Result<()> {
     use std::io::{self, Write};
-    println!("AETHER DB REPL v2.0 BILINGÜE ES/EN - HELP/AYUDA para ayuda, EXIT/SALIR para salir");
-    let wal_path = std::env::temp_dir().join(format!("argentum_repl_{}.wal", std::process::id()));
-    let cat_path = std::env::temp_dir().join(format!("argentum_repl_cat_{}.txt", std::process::id()));
-    let wal = WalManager::open(wal_path.to_str().unwrap()).unwrap();
-    let bp = Arc::new(BufferPool::new(128));
-    let trinity = TrinityIndex::new(bp.clone(), wal.clone());
-    let db = Database::new(wal.clone(), bp.clone(), trinity, Some(cat_path.to_str().unwrap().into()));
-    let _ = argentum_engine::parser::parse("CREATE TABLE productos (id INT PRIMARY KEY, nombre TEXT, descripcion TEXT, categoria_id INT, embedding VECTOR(768))").map(|p| db.execute(p));
-    let mut trinity_legacy = TrinityIndex::new(bp.clone(), wal.clone());
+    println!("Argentum DB REPL v3.0 BILINGÜE ES/EN + multi-base");
+    println!("HELP/AYUDA para ayuda, EXIT/SALIR para salir");
+    // Base del REPL: --data-dir <path> si se pasó, si no ./data/repl_<pid>/.
+    // Con --data-dir los datos persisten entre invocaciones (útil para tests y
+    // para usar Argentum como almacenamiento real entre sesiones).
+    let base_dir = data_dir
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("./data/repl_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&base_dir);
+    let mut mgr = argentum_engine::DatabaseManager::new(&base_dir);
+    // Crear tabla de ejemplo "productos" en la base activa si no existe.
+    if let Some(db) = mgr.current() {
+        let plan_sql = "CREATE TABLE productos (id INT PRIMARY KEY, nombre TEXT, descripcion TEXT, categoria_id INT, embedding VECTOR(768))";
+        if let Ok(plan) = argentum_engine::parser::parse(plan_sql) {
+            let _ = db.execute(plan);
+        }
+    }
+    let bp_legacy = Arc::new(BufferPool::new(128));
+    let wal_legacy = WalManager::open(std::env::temp_dir().join("argentum_repl_legacy.wal").to_str().unwrap()).unwrap();
+    let mut trinity_legacy = TrinityIndex::new(bp_legacy, wal_legacy);
     let mut next_id: u64 = 100;
     loop {
-        print!("aether> ");
+        repl_prompt(mgr.current_db());
         io::stdout().flush().unwrap();
         let mut line = String::new();
         if io::stdin().read_line(&mut line).is_err() { break; }
@@ -284,14 +344,21 @@ fn run_repl() -> std::io::Result<()> {
             println!("  AGREGAR EN / INSERT INTO   |  ACTUALIZA / UPDATE  |  BORRAR DE / DELETE FROM");
             println!("  ELIGE / SELECT  |  BUSCA / SEARCH  |  CUENTA / COUNT");
             println!("  MUESTRA TABLA / DESCRIBE TABLE / ESTRUCTURA / ESQUEMA  (ver estructura)");
-            println!("  Ej: CREA TABLA t (id INT, nombre TEXT)");
-            println!("  Ej: MUESTRA TABLA t  /  DESCRIBE TABLA t  /  ESTRUCTURA t  /  MUESTRA ESTRUCTURA DE TABLA t");
-            println!("  Ej: ELIGE * DE t DONDE cat=5 ORDENA POR nombre ASC LIMITE 5");
-            println!("  Ej: ELIGE cat, CUENTA(*) DE t AGRUPA POR cat ORDENA POR CUENTA(*) DESC LIMITE 5");
-            println!("  Ej: BUSCA * EN t DONDE cat=5 LIMITE 5");
-            println!("  Ej: AGREGAR EN t (id, nombre) VALORES (1, 'Zapatilla')");
-            println!("  Ej: ACTUALIZA t ESTABLECE nombre='x' DONDE id=1");
-            println!("  Ej: BORRAR DE t DONDE id=1");
+            println!("Bases de datos / Databases:");
+            println!("  CREA BASE mi_tienda      | CREATE DATABASE my_store");
+            println!("  USA BASE mi_tienda       | USE DATABASE my_store");
+            println!("  BORRA BASE mi_tienda     | DROP DATABASE my_store");
+            println!("  MUESTRA BASES            | SHOW DATABASES");
+            println!("  (siempre existe 'default')");
+            println!("Ejemplos:");
+            println!("  CREA TABLA t (id INT, nombre TEXT)");
+            println!("  MUESTRA TABLA t  /  DESCRIBE TABLA t  /  ESTRUCTURA t  /  MUESTRA ESTRUCTURA DE TABLA t");
+            println!("  ELIGE * DE t DONDE cat=5 ORDENA POR nombre ASC LIMITE 5");
+            println!("  ELIGE cat, CUENTA(*) DE t AGRUPA POR cat ORDENA POR CUENTA(*) DESC LIMITE 5");
+            println!("  BUSCA * EN t DONDE cat=5 LIMITE 5");
+            println!("  AGREGAR EN t (id, nombre) VALORES (1, 'Zapatilla')");
+            println!("  ACTUALIZA t ESTABLECE nombre='x' DONDE id=1");
+            println!("  BORRAR DE t DONDE id=1");
             println!("REPL corto:");
             println!("  INSERT <nombre> | <desc> | <cat>  o  AGREGAR <nombre> | <desc> | <cat>");
             println!("  SEARCH <texto>  o  BUSCA <texto>");
@@ -300,13 +367,17 @@ fn run_repl() -> std::io::Result<()> {
             continue;
         }
         if up == "STATS" || up == "ESTADO" {
-            let cat = db.catalog.read().unwrap();
-            println!("Tablas: {}", cat.list_tables().iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", "));
-            let data = db.data.read().unwrap();
-            for (tbl, rows) in data.iter() { println!("  {}: {} filas", tbl, rows.len()); }
+            println!("Base activa / current: {}", mgr.current_db());
+            let tables = mgr.tables();
+            println!("Tablas: {}", if tables.is_empty() { "(ninguna)".into() } else { tables.join(", ") });
+            if let Some(db) = mgr.current() {
+                let data = db.data.read().unwrap();
+                for (tbl, rows) in data.iter() { println!("  {}: {} filas", tbl, rows.len()); }
+            }
             println!("Trinity: {} tuplas {} páginas", trinity_legacy.num_tuples, trinity_legacy.num_pages);
             continue;
         }
+        // Shortcuts INSERT/AGREGAR con pipes (sin pasar por parser)
         if (up.starts_with("INSERT ") || up.starts_with("AGREGAR ") || up.starts_with("AGREGA ")) && !up.starts_with("INSERT INTO") && !up.starts_with("AGREGAR EN") {
             let payload = if up.starts_with("INSERT ") { &cmd[7..] } else if up.starts_with("AGREGAR ") { &cmd[8..] } else { &cmd[7..] };
             if payload.contains('|') {
@@ -319,7 +390,10 @@ fn run_repl() -> std::io::Result<()> {
                 row.insert("descripcion".into(), Value::Text(desc.into()));
                 row.insert("categoria_id".into(), Value::Int(cat));
                 row.insert("embedding".into(), Value::Vector(embed(&format!("{} {}", nombre, desc), 768)));
-                match db.insert_row("productos", row) {
+                let outcome = if let Some(db) = mgr.current() {
+                    db.insert_row("productos", row)
+                } else { Err("No hay base activa".into()) };
+                match outcome {
                     Ok(_) => println!("OK AGREGAR id={} (SQL)", next_id),
                     Err(e) => {
                         let vec = embed(&format!("{} {}", nombre, desc), 768);
@@ -332,6 +406,7 @@ fn run_repl() -> std::io::Result<()> {
                 continue;
             }
         }
+        // Shortcuts SEARCH/BUSCA sin asterisco
         if (up.starts_with("SEARCH ") || up.starts_with("BUSCA ") || up.starts_with("BUSCAR ")) && !up.starts_with("SEARCH *") && !up.starts_with("BUSCA *") {
             let q = if up.starts_with("SEARCH ") { &cmd[7..] } else if up.starts_with("BUSCA ") { &cmd[6..] } else { &cmd[7..] };
             let qvec = embed(q, 768);
@@ -340,14 +415,28 @@ fn run_repl() -> std::io::Result<()> {
             if res.is_empty() { println!("(sin resultados)"); } else { for (i,r) in res.iter().enumerate(){ println!("{}. BUSCA/SEARCH slot={} score={:.4}", i+1, r.slot_id, r.score_fused); } }
             continue;
         }
+        // SQL estándar: primero detectamos planes de base de datos
         match argentum_engine::parser::parse(cmd) {
-            Ok(plan) => match db.execute(plan) { Ok(res) => println!("{}", res.to_display()), Err(e) => println!("Error: {}", e), },
+            Ok(plan) => {
+                if let Some(out) = handle_db_plan(&mut mgr, &plan) {
+                    println!("{}", out);
+                    continue;
+                }
+                // Si no es plan de BD, delegamos a la base activa.
+                if let Some(db) = mgr.current() {
+                    match db.execute(plan) {
+                        Ok(res) => println!("{}", res.to_display()),
+                        Err(e) => println!("Error: {}", e),
+                    }
+                } else {
+                    println!("Error: No hay base activa / no current database");
+                }
+            }
             Err(e) => println!("Error parse: {} (HELP/AYUDA)", e),
         }
     }
-    let _ = std::fs::remove_file(&wal_path);
-    let _ = std::fs::remove_file(&cat_path);
     println!("¡Hasta luego! / Bye.");
+    println!("(datos en {} / data persisted at)", base_dir);
     Ok(())
 }
 
@@ -357,7 +446,14 @@ fn main() -> std::io::Result<()> {
     if args.iter().any(|a| a == "--demo") { run_trinity_demo()?; run_demo_sql()?; run_demo_es()?; return Ok(()); }
     if args.iter().any(|a| a == "--demo-sql") { return run_demo_sql(); }
     if args.iter().any(|a| a == "--demo-es") { return run_demo_es(); }
-    if args.iter().any(|a| a == "--repl") { return run_repl(); }
+    if args.iter().any(|a| a == "--repl") {
+        // --data-dir <path> opcional: persistir en un directorio fijo entre sesiones
+        let data_dir = args.iter()
+            .position(|a| a == "--data-dir")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        return run_repl_with_dir(data_dir.as_deref());
+    }
     eprintln!("Opción desconocida. Usa --help"); std::process::exit(1);
 }
 

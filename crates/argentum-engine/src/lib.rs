@@ -34,6 +34,11 @@ pub enum LogicalPlan {
     AlterTableDropColumn { table: String, column: String },
     DropTable { table: String },
     DescribeTable { table: String },
+    ShowTables,
+    CreateDatabase { name: String },
+    DropDatabase { name: String },
+    UseDatabase { name: String },
+    ShowDatabases,
     Insert { table: String, columns: Vec<String>, values: Vec<String> },
     Delete { table: String, where_clause: Option<String> },
     Update { table: String, assignments: Vec<(String, String)>, where_clause: Option<String> },
@@ -492,7 +497,7 @@ impl Database {
             LogicalPlan::AlterTableAddColumn { table, column, col_type } => self.exec_alter_add(table, column, col_type),
             LogicalPlan::AlterTableDropColumn { table, column } => self.exec_alter_drop(table, column),
             LogicalPlan::DropTable { table } => self.exec_drop(table),
-            LogicalPlan::DescribeTable { table } => self.exec_describe(table),
+LogicalPlan::DescribeTable { table } => self.exec_describe(table),
             LogicalPlan::Insert { table, columns, values } => self.exec_insert(table, columns, values),
             LogicalPlan::Delete { table, where_clause } => self.exec_delete(table, where_clause),
             LogicalPlan::Update { table, assignments, where_clause } => self.exec_update(table, assignments, where_clause),
@@ -683,8 +688,8 @@ impl Database {
             let is_default = val_raw.trim().eq_ignore_ascii_case("DEFAULT");
             if let Some(id_spec) = &col_def.identity {
                 if is_default {
-                    let gen = self.next_identity(&table, col);
-                    row.insert(col.clone(), Value::Int(gen));
+let generated_id = self.next_identity(&table, col);
+                    row.insert(col.clone(), Value::Int(generated_id));
                     continue;
                 }
                 // Valor explícito para columna IDENTITY
@@ -719,8 +724,8 @@ impl Database {
                 full_row.insert(col_def.name.clone(), found);
             } else if let Some(id_spec) = &col_def.identity {
                 // Generar autoincremental si no se proveyó
-                let gen = self.next_identity(&table, &col_def.name);
-                full_row.insert(col_def.name.clone(), Value::Int(gen));
+let generated_id = self.next_identity(&table, &col_def.name);
+                full_row.insert(col_def.name.clone(), Value::Int(generated_id));
                 let _ = id_spec;
             } else {
                 full_row.insert(col_def.name.clone(), Value::Null);
@@ -736,6 +741,7 @@ impl Database {
             let vec = data.get_mut(&table.to_lowercase()).ok_or(format!("Tabla '{}' no encontrada", table))?;
             vec.push(full_row);
         }
+        self.persist_heap();
         Ok(ExecutionResult::Inserted { count: 1 })
     }
 
@@ -762,6 +768,8 @@ impl Database {
             }
         }
         *rows = retained;
+        drop(data);
+        self.persist_heap();
         Ok(ExecutionResult::Deleted { count: deleted })
     }
 
@@ -789,8 +797,10 @@ impl Database {
                 count += 1;
             }
         }
+        drop(data);
         // También actualizar TRINITY si hay vector
         // Para v1, no reindexamos físicamente, solo dato en memoria
+        self.persist_heap();
         Ok(ExecutionResult::Updated { count })
     }
 
@@ -992,8 +1002,8 @@ impl Database {
             if let Some(v) = row.get(&col_def.name) {
                 // Manejar DEFAULT -> generar
                 if matches!(v, Value::Text(s) if s.eq_ignore_ascii_case("DEFAULT")) && col_def.identity.is_some() {
-                    let gen = self.next_identity(table, &col_def.name);
-                    full_row.insert(col_def.name.clone(), Value::Int(gen));
+let generated_id = self.next_identity(table, &col_def.name);
+                    full_row.insert(col_def.name.clone(), Value::Int(generated_id));
                 } else {
                     // Si es identidad BY DEFAULT con valor explícito, avanzar secuencia
                     if col_def.identity.is_some() {
@@ -1005,17 +1015,17 @@ impl Database {
                 let found = row.iter().find(|(k,_)| k.eq_ignore_ascii_case(&col_def.name)).map(|(_,v)| v).cloned();
                 if let Some(v) = found {
                     if matches!(&v, Value::Text(s) if s.eq_ignore_ascii_case("DEFAULT")) && col_def.identity.is_some() {
-                        let gen = self.next_identity(table, &col_def.name);
-                        full_row.insert(col_def.name.clone(), Value::Int(gen));
+let generated_id = self.next_identity(table, &col_def.name);
+                    full_row.insert(col_def.name.clone(), Value::Int(generated_id));
                     } else {
                         if col_def.identity.is_some() {
                             if let Value::Int(i) = &v { self.advance_sequence_for_explicit(table, &col_def.name, *i); }
                         }
                         full_row.insert(col_def.name.clone(), v);
                     }
-                } else if let Some(id_spec) = &col_def.identity {
-                    let gen = self.next_identity(table, &col_def.name);
-                    full_row.insert(col_def.name.clone(), Value::Int(gen));
+} else if let Some(id_spec) = &col_def.identity {
+                    let generated_id = self.next_identity(table, &col_def.name);
+                    full_row.insert(col_def.name.clone(), Value::Int(generated_id));
                     let _ = id_spec;
                 } else {
                     full_row.insert(col_def.name.clone(), Value::Null);
@@ -1026,10 +1036,256 @@ impl Database {
         let vec = data.get_mut(&table.to_lowercase()).ok_or(format!("Table '{}' not found", table))?;
         vec.push(full_row);
         Ok(())
+}
+}
+
+/// Database Manager: manages multiple databases with persistence in ./data/
+/// Layout on disk:
+///   {base_dir}/
+///     databases.txt            # canonical list (one name per line)
+///     default/
+///       catalog.json  heap.json  aether.wal
+///     <other_db>/
+///       catalog.json  heap.json  aether.wal
+pub struct DatabaseManager {
+    base_dir: String,
+    current_db: String,
+    databases: HashMap<String, Arc<Database>>,
+    manifest_path: String,
+}
+
+impl DatabaseManager {
+    pub fn new(base_dir: &str) -> Self {
+        let _ = std::fs::create_dir_all(base_dir);
+        let manifest_path = format!("{}/databases.txt", base_dir.trim_end_matches('/'));
+        let mut mgr = Self {
+            base_dir: base_dir.to_string(),
+            current_db: "default".to_string(),
+            databases: HashMap::new(),
+            manifest_path,
+        };
+        // Asegurar que "default" exista siempre y esté listada.
+        let _ = mgr.ensure_default();
+        // Cargar manifest si existe.
+        mgr.load_manifest();
+        mgr
+    }
+
+    fn ensure_default(&mut self) -> Result<(), String> {
+        let path = self.db_path("default");
+        let cat = self.catalog_path("default");
+        let heap = self.heap_path("default");
+        let is_fresh = !std::path::Path::new(&path).exists();
+        if is_fresh {
+            let _ = std::fs::create_dir_all(&path);
+        }
+        // Asegurar que exista al menos catalog.json (vacío) si no había nada.
+        if !std::path::Path::new(&cat).exists() {
+            // El Catalog::with_persist crea el archivo vacío solo cuando se le piden operaciones.
+            // Lo creamos manualmente con un objeto JSON mínimo.
+            let _ = std::fs::write(&cat, "{\n  \"tables\": [],\n  \"sequences\": {}\n}\n");
+        }
+        // Si default no está en memoria, abrirla (no pisa: with_data_dir carga heap.json si existe,
+        // y como acabamos de crear el dir, simplemente inicializa vacío).
+        if !self.databases.contains_key("default") {
+            let db = Database::with_data_dir(&path);
+            self.databases.insert("default".to_string(), Arc::new(db));
+        }
+        // Persistir manifest con default si era nuevo.
+        if is_fresh {
+            let _ = self.append_manifest("default");
+        }
+        Ok(())
+    }
+
+    fn db_path(&self, name: &str) -> String {
+        format!("{}/{}", self.base_dir.trim_end_matches('/'), name)
+    }
+
+    fn catalog_path(&self, name: &str) -> String {
+        format!("{}/catalog.json", self.db_path(name))
+    }
+
+    fn heap_path(&self, name: &str) -> String {
+        format!("{}/heap.json", self.db_path(name))
+    }
+
+    fn manifest_path(&self) -> &str { &self.manifest_path }
+
+    fn append_manifest(&self, name: &str) -> Result<(), String> {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.manifest_path())
+            .map_err(|e| format!("No se pudo abrir manifest: {}", e))?;
+        writeln!(f, "{}", name).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn remove_from_manifest(&self, name: &str) -> Result<(), String> {
+        if !std::path::Path::new(self.manifest_path()).exists() { return Ok(()); }
+        let content = std::fs::read_to_string(self.manifest_path()).unwrap_or_default();
+        let filtered: Vec<&str> = content.lines().filter(|l| l.trim() != name && !l.trim().is_empty()).collect();
+        std::fs::write(self.manifest_path(), filtered.join("\n") + if filtered.is_empty() { "" } else { "\n" })
+            .map_err(|e| e.to_string())
+    }
+
+    fn load_manifest(&mut self) {
+        let Ok(content) = std::fs::read_to_string(self.manifest_path()) else { return; };
+        for line in content.lines() {
+            let name = line.trim();
+            if name.is_empty() { continue; }
+            if name == "default" { continue; } // ya en memoria
+            // Cargar base si el directorio existe con catalog.json
+            if std::path::Path::new(&self.db_path(name)).exists() {
+                if !self.databases.contains_key(name) {
+                    let db = Database::with_data_dir(&self.db_path(name));
+                    self.databases.insert(name.to_string(), Arc::new(db));
+                }
+            }
+        }
+    }
+
+    /// Verifica que un nombre de base sea válido (no vacío, sin separadores, no reservado).
+    fn validate_name(name: &str) -> Result<(), String> {
+        if name.is_empty() {
+            return Err("Nombre de base vacío / Empty database name".into());
+        }
+        if name == "." || name == ".." {
+            return Err(format!("Nombre reservado '{}' / Reserved name", name));
+        }
+        if name.contains('/') || name.contains('\\') || name.contains('\0') {
+            return Err(format!("Nombre inválido '{}': no puede contener /, \\, ni NUL / invalid chars", name));
+        }
+        if name.len() > 64 {
+            return Err("Nombre demasiado largo (max 64) / Name too long".into());
+        }
+        Ok(())
+    }
+
+    /// Verifica que una base parezca "existente" en disco (al menos catalog.json o heap.json).
+    fn db_exists_on_disk(&self, name: &str) -> bool {
+        let path = self.db_path(name);
+        if !std::path::Path::new(&path).exists() { return false; }
+        let cat = self.catalog_path(name);
+        let heap = self.heap_path(name);
+        std::path::Path::new(&cat).exists() || std::path::Path::new(&heap).exists()
+    }
+
+    pub fn create_database(&mut self, name: &str) -> Result<(), String> {
+        Self::validate_name(name)?;
+        if name == "default" {
+            return Err("'default' ya existe / 'default' already exists".into());
+        }
+        // Verificar duplicado: en memoria O en disco con contenido real
+        if self.databases.contains_key(name) {
+            return Err(format!("Base de datos '{}' ya existe (en memoria) / already exists in memory", name));
+        }
+        if self.db_exists_on_disk(name) {
+            return Err(format!("Base de datos '{}' ya existe (en disco) / already exists on disk", name));
+        }
+        // Crear estructura vacía
+        let path = self.db_path(name);
+        std::fs::create_dir_all(&path).map_err(|e| format!("Error creando directorio: {}", e))?;
+        // Crear catalog.json mínimo para que db_exists_on_disk la reconozca
+        let cat = self.catalog_path(name);
+        std::fs::write(&cat, "{\n  \"tables\": [],\n  \"sequences\": {}\n}\n")
+            .map_err(|e| format!("Error creando catalog.json: {}", e))?;
+        // Instanciar Database (vacío, sin heap.json)
+        let db = Database::with_data_dir(&path);
+        self.databases.insert(name.to_string(), Arc::new(db));
+        self.append_manifest(name)?;
+        Ok(())
+    }
+
+    pub fn use_database(&mut self, name: &str) -> Result<(), String> {
+        Self::validate_name(name)?;
+        if !self.databases.contains_key(name) {
+            // Cargar desde disco SOLO si la base existe de verdad
+            if !self.db_exists_on_disk(name) {
+                return Err(format!("Base de datos '{}' no existe / database not found", name));
+            }
+            let db = Database::with_data_dir(&self.db_path(name));
+            self.databases.insert(name.to_string(), Arc::new(db));
+        }
+        self.current_db = name.to_string();
+        Ok(())
+    }
+
+    pub fn drop_database(&mut self, name: &str) -> Result<(), String> {
+        Self::validate_name(name)?;
+        if name == "default" {
+            return Err("No se puede borrar la base 'default' / Cannot drop 'default'".to_string());
+        }
+        if !self.databases.contains_key(name) && !self.db_exists_on_disk(name) {
+            return Err(format!("Base de datos '{}' no existe / database not found", name));
+        }
+        // Remover directorio (no debe fallar si no existe)
+        let path = self.db_path(name);
+        if std::path::Path::new(&path).exists() {
+            std::fs::remove_dir_all(&path).map_err(|e| format!("Error eliminando directorio: {}", e))?;
+        }
+        self.databases.remove(name);
+        let _ = self.remove_from_manifest(name);
+        // Si era la base actual, volver a default
+        if self.current_db == name {
+            self.current_db = "default".to_string();
+        }
+        Ok(())
+    }
+
+    pub fn show_databases(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.databases.keys().cloned().collect();
+        // Si el FS tiene bases que el manager no conoce (ej. creadas en otra sesión y aún no manifest),
+        // las añadimos (filtrando "default" para no duplicar).
+        if let Ok(entries) = std::fs::read_dir(&self.base_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if !p.is_dir() { continue; }
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name == "default" { continue; }
+                if !self.databases.contains_key(&name) && self.db_exists_on_disk(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    pub fn current_db(&self) -> &str {
+        &self.current_db
+    }
+
+    /// Devuelve un clon del Arc<Database> activo. None si la base activa no está en memoria
+    /// (no debería ocurrir si use_database/create_database se usaron correctamente).
+    pub fn current(&self) -> Option<Arc<Database>> {
+        self.databases.get(&self.current_db).cloned()
+    }
+
+    /// Acceso de solo lectura a una base específica por nombre.
+    pub fn get(&self, name: &str) -> Option<Arc<Database>> {
+        self.databases.get(name).cloned()
+    }
+
+    /// Nombre del directorio base (para mensajes al usuario).
+    pub fn base_dir(&self) -> &str {
+        &self.base_dir
+    }
+
+    pub fn tables(&self) -> Vec<String> {
+        if let Some(db) = self.databases.get(&self.current_db) {
+            let cat = db.catalog.read().unwrap();
+            cat.list_tables().into_iter().map(|t| t.name.clone()).collect()
+        } else {
+            Vec::new()
+        }
     }
 }
 
-/// Optimizador cost-based (skeleton)
+/// Optimizer: cost-based rewriter (skeleton/passthrough por ahora).
 pub struct Optimizer;
 
 impl Optimizer {

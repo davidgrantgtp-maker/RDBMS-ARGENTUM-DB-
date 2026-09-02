@@ -19,6 +19,73 @@ fn extract_table_name(s: &str) -> String {
     s.trim().split_whitespace().next().unwrap_or("").trim_matches(|c| c == '"' || c == '\'' || c == '`').to_string()
 }
 
+fn is_show_tables(upper: &str) -> bool {
+    let u = upper.trim();
+    matches!(u, "MUESTRA TABLAS" | "MOSTRAR TABLAS" | "SHOW TABLES" | "LISTA TABLAS" | "LISTAR TABLAS" | "VER TABLAS" | "QUE TABLAS HAY" | "MOSTRAME TODO")
+        || u == "MUESTRA TABLAS;" || u == "SHOW TABLES;"
+        || u.contains("MUESTRA TABLAS") && !u.contains("MUESTRA TABLA ") // plural, not singular
+}
+
+// Helpers para bases de datos
+fn strip_create_database(sql: &str) -> Option<String> {
+    for prefix in &["CREATE DATABASE", "CREAR BASE", "CREA BASE", "CREA BASE DE DATOS", "CREATE BASE"] {
+        if let Some(rest) = strip_prefix_ci(sql, prefix) {
+            // Para "CREA BASE DE DATOS foo" el prefix matcheó "CREA BASE" y quedó "DE DATOS foo"
+            // (o si matcheó "CREA BASE DE DATOS" quedó "foo"). En el primer caso, saltar "DE DATOS".
+            let mut r = rest.trim();
+            let r_up = r.to_uppercase();
+            if r_up.starts_with("DE DATOS ") || r_up.starts_with("DE DATOS") && r_up.len() > "DE DATOS".len() {
+                r = r["DE DATOS".len()..].trim();
+            }
+            // También soportar "DE <name>" (raro pero tolerante)
+            let name = extract_table_name(r);
+            if !name.is_empty() && !name.eq_ignore_ascii_case("TABLE") && !name.eq_ignore_ascii_case("TABLA") && name.to_uppercase() != "DE" && name.to_uppercase() != "DATOS" {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+fn strip_drop_database(sql: &str) -> Option<String> {
+    for prefix in &["DROP DATABASE", "BORRA BASE", "ELIMINA BASE", "BORRAR BASE", "DROP BASE", "ELIMINAR BASE", "BORRA BASE DE DATOS", "ELIMINA BASE DE DATOS"] {
+        if let Some(rest) = strip_prefix_ci(sql, prefix) {
+            let mut r = rest.trim();
+            let r_up = r.to_uppercase();
+            if r_up.starts_with("DE DATOS ") || (r_up.starts_with("DE DATOS") && r_up.len() > "DE DATOS".len()) {
+                r = r["DE DATOS".len()..].trim();
+            }
+            let name = extract_table_name(r);
+            if !name.is_empty() && name.to_uppercase() != "DE" && name.to_uppercase() != "DATOS" {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+fn strip_use_database(sql: &str) -> Option<String> {
+    for prefix in &["USE DATABASE", "USA BASE", "USA BASE DE DATOS", "USE BASE", "USA", "USE"] {
+        if let Some(rest) = strip_prefix_ci(sql, prefix) {
+            // Para "USA" solo, el resto es el nombre directo, pero evitar "USA BASE" ya manejado
+            let mut r = rest.trim();
+            // Si prefix fue "USE" y resto empieza con "DATABASE" o "BASE", saltarlo
+            let r_up = r.to_uppercase();
+            if r_up.starts_with("DATABASE ") { r = r["DATABASE".len()..].trim(); }
+            else if r_up.starts_with("BASE ") { r = r["BASE".len()..].trim(); }
+            else if r_up.starts_with("BASE DE DATOS ") { r = r["BASE DE DATOS".len()..].trim(); }
+            let name = extract_table_name(r);
+            if !name.is_empty() && name.to_uppercase() != "BASE" && name.to_uppercase() != "DATABASE" {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+fn is_show_databases(upper: &str) -> bool {
+    let u = upper.trim();
+    matches!(u, "MUESTRA BASES" | "MOSTRAR BASES" | "SHOW DATABASES" | "LISTA BASES" | "LISTAR BASES" | "VER BASES" | "SHOW BASES")
+        || u.contains("MUESTRA BASES") || u.contains("SHOW DATABASES") || u.contains("MOSTRAR BASES")
+}
+
 fn parse_describe(sql: &str) -> Result<LogicalPlan, String> {
     // Soporta múltiples variantes ES/EN, todas case-insensitive, con y sin "TABLA/TABLE"
     // Orden: los más largos primero para evitar prefijo ambiguo
@@ -219,6 +286,27 @@ pub fn parse(sql: &str) -> Result<LogicalPlan, String> {
     let trimmed = trim_semicolon(sql);
     if trimmed.is_empty() { return Err("Empty query".into()); }
     let upper = trimmed.to_uppercase();
+
+    // SHOW TABLES / MUESTRA TABLAS - debe ir antes que DESCRIBE (para distinguir TABLA vs TABLAS)
+    if is_show_tables(&upper) {
+        return Ok(LogicalPlan::ShowTables);
+    }
+    // SHOW DATABASES / MUESTRA BASES
+    if is_show_databases(&upper) {
+        return Ok(LogicalPlan::ShowDatabases);
+    }
+    // CREATE DATABASE / CREA BASE
+    if let Some(name) = strip_create_database(trimmed) {
+        return Ok(LogicalPlan::CreateDatabase { name });
+    }
+    // DROP DATABASE / BORRA BASE
+    if let Some(name) = strip_drop_database(trimmed) {
+        return Ok(LogicalPlan::DropDatabase { name });
+    }
+    // USE DATABASE / USA BASE
+    if let Some(name) = strip_use_database(trimmed) {
+        return Ok(LogicalPlan::UseDatabase { name });
+    }
 
     // DESCRIBE / MUESTRA / ESTRUCTURA / ESQUEMA / SHOW - comando para ver estructura (ES) - debe ir primero
     let describe_prefixes = ["DESCRIBE", "SHOW", "MUESTRA", "MOSTRAR", "ESTRUCTURA", "ESQUEMA"];
