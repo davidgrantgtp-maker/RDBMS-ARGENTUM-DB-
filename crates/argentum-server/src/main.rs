@@ -297,6 +297,31 @@ fn handle_db_plan(mgr: &mut argentum_engine::DatabaseManager, plan: &argentum_en
             s.push_str(&format!("(* = activa / current)\n({} total)", dbs.len()));
             Some(s)
         }
+        LogicalPlan::ShowTables => {
+            if let Some(db) = mgr.current() {
+                let plan = argentum_engine::LogicalPlan::ShowTables;
+                match db.execute(plan) {
+                    Ok(argentum_engine::ExecutionResult::Selected { columns, rows }) => {
+                        let mut s = String::from("Tablas de la base activa / Tables in current database:\n");
+                        // Header
+                        s.push_str(&format!("{}\n", columns.join(" | ")));
+                        s.push_str(&"-".repeat(s.len()));
+                        s.push('\n');
+                        for row in &rows {
+                            let vals: Vec<String> = columns.iter().map(|c| {
+                                row.get(c).map(|v| format!("{}", v)).unwrap_or_default()
+                            }).collect();
+                            s.push_str(&format!("{}\n", vals.join(" | ")));
+                        }
+                        Some(s)
+                    }
+                    Ok(other) => Some(format!("{:?}", other)),
+                    Err(e) => Some(format!("Error: {}", e)),
+                }
+            } else {
+                Some("No hay base activa / No current database".into())
+            }
+        }
         _ => None,
     }
 }
@@ -343,6 +368,7 @@ fn run_repl_with_dir(data_dir: Option<&str>) -> std::io::Result<()> {
             println!("  CREA TABLA / CREATE TABLE  |  CAMBIA TABLA / ALTER TABLE  |  BORRA TABLA / DROP TABLE");
             println!("  AGREGAR EN / INSERT INTO   |  ACTUALIZA / UPDATE  |  BORRAR DE / DELETE FROM");
             println!("  ELIGE / SELECT  |  BUSCA / SEARCH  |  CUENTA / COUNT");
+            println!("  MUESTRA TABLAS / SHOW TABLES  (lista tablas de la base activa)");
             println!("  MUESTRA TABLA / DESCRIBE TABLE / ESTRUCTURA / ESQUEMA  (ver estructura)");
             println!("Bases de datos / Databases:");
             println!("  CREA BASE mi_tienda      | CREATE DATABASE my_store");

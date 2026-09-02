@@ -498,6 +498,7 @@ impl Database {
             LogicalPlan::AlterTableDropColumn { table, column } => self.exec_alter_drop(table, column),
             LogicalPlan::DropTable { table } => self.exec_drop(table),
 LogicalPlan::DescribeTable { table } => self.exec_describe(table),
+            LogicalPlan::ShowTables => self.exec_show_tables(),
             LogicalPlan::Insert { table, columns, values } => self.exec_insert(table, columns, values),
             LogicalPlan::Delete { table, where_clause } => self.exec_delete(table, where_clause),
             LogicalPlan::Update { table, assignments, where_clause } => self.exec_update(table, assignments, where_clause),
@@ -612,6 +613,23 @@ LogicalPlan::DescribeTable { table } => self.exec_describe(table),
         }
         self.persist_heap();
         Ok(ExecutionResult::Dropped { table })
+    }
+
+    fn exec_show_tables(&self) -> Result<ExecutionResult, String> {
+        let mut rows: Vec<Row> = Vec::new();
+        {
+            let cat = self.catalog.read().unwrap();
+            for t in cat.list_tables() {
+                let mut row = Row::new();
+                row.insert("Tabla".into(), Value::Text(t.name.clone()));
+                row.insert("Columnas".into(), Value::Int(t.columns.len() as i64));
+                let pk_cols: Vec<_> = t.columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect();
+                row.insert("Clave Primaria".into(), Value::Text(if pk_cols.is_empty() { "-".into() } else { pk_cols.join(", ") }));
+                rows.push(row);
+            }
+        }
+        let cols = vec!["Tabla".into(), "Columnas".into(), "Clave Primaria".into()];
+        Ok(ExecutionResult::Selected { columns: cols, rows })
     }
 
     fn exec_describe(&self, table: String) -> Result<ExecutionResult, String> {
