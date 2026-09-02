@@ -1,0 +1,10 @@
+[package]
+name = "argentum-index"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+argentum-common = { workspace = true }
+argentum-storage = { workspace = true }
+
+

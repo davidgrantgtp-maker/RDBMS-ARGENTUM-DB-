@@ -1,13 +1,13 @@
 //! tests/integration_wal.rs - WAL crash recovery y MVCC
 //! Ejecuta: cargo test -p aether-storage --test integration_wal -- --nocapture
 
-use aether_common::{TupleHeader, Rid, PAGE_SIZE};
-use aether_storage::page::{Page, TrinityPayload};
-use aether_storage::wal::{WalManager, WalRecord};
+use argentum_common::{TupleHeader, Rid, PAGE_SIZE};
+use argentum_storage::page::{Page, TrinityPayload};
+use argentum_storage::wal::{WalManager, WalRecord};
 
 #[test]
 fn wal_crash_recovery_replay() {
-    let path = std::env::temp_dir().join(format!("aether_wal_recovery_{}.log", std::process::id()));
+    let path = std::env::temp_dir().join(format!("argentum_wal_recovery_{}.log", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let wal = WalManager::open(path.to_str().unwrap()).unwrap();
 
@@ -41,7 +41,7 @@ fn wal_crash_recovery_replay() {
 
 #[test]
 fn wal_group_commit_batches() {
-    let path = std::env::temp_dir().join(format!("aether_group_{}.log", std::process::id()));
+    let path = std::env::temp_dir().join(format!("argentum_group_{}.log", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let wal = WalManager::open(path.to_str().unwrap()).unwrap();
 
@@ -94,3 +94,4 @@ fn page_trinity_payload_roundtrip() {
     assert_eq!(decoded.bm25_postings, b"posting1");
     println!("[page] payload roundtrip {} bytes ok", buf.len());
 }
+

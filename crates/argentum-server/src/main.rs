@@ -1,8 +1,8 @@
 //! crates/aether-server/src/main.rs - Demo CLI AETHER DB v2 BILINGÜE ES/EN
-use aether_engine::{Database, Row, Value};
-use aether_index::{SearchParams, TrinityIndex};
-use aether_storage::buffer_pool::BufferPool;
-use aether_storage::wal::WalManager;
+use argentum_engine::{Database, Row, Value};
+use argentum_index::{SearchParams, TrinityIndex};
+use argentum_storage::buffer_pool::BufferPool;
+use argentum_storage::wal::WalManager;
 use std::sync::Arc;
 
 struct Lcg(u64);
@@ -77,7 +77,7 @@ fn print_help() {
 
 fn run_trinity_demo() -> std::io::Result<()> {
     println!("=== AETHER DB --demo TRINITY ===");
-    let wal_path = std::env::temp_dir().join(format!("aether_demo_{}.wal", std::process::id()));
+    let wal_path = std::env::temp_dir().join(format!("argentum_demo_{}.wal", std::process::id()));
     let _ = std::fs::remove_file(&wal_path);
     let wal = WalManager::open(wal_path.to_str().unwrap()).unwrap();
     let bp = Arc::new(BufferPool::new(128));
@@ -101,8 +101,8 @@ fn run_trinity_demo() -> std::io::Result<()> {
         let csr = (*cat as u32).to_le_bytes().to_vec();
         let pq_dummy = &vector[..2].iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>()[..8];
         let mut payload = Vec::new();
-        aether_storage::page::TrinityPayload::serialize(row.as_bytes(), pq_dummy, desc.as_bytes(), &csr, &mut payload);
-        let lsn = wal.append(aether_storage::WalRecord::TrinityInsert{ txn_id: *id as u64, lsn: 0, page_id: 1, slot_id: 0, payload, prev_lsn: 0 }).unwrap();
+        argentum_storage::page::TrinityPayload::serialize(row.as_bytes(), pq_dummy, desc.as_bytes(), &csr, &mut payload);
+        let lsn = wal.append(argentum_storage::WalRecord::TrinityInsert{ txn_id: *id as u64, lsn: 0, page_id: 1, slot_id: 0, payload, prev_lsn: 0 }).unwrap();
         let slot = idx.insert(1, row.as_bytes(), &vector, desc.as_bytes(), &csr, *id as u64, lsn).unwrap();
         println!("  INSERT/AGREGAR id={} '{}' slot={} LSN={}", id, nombre, slot, lsn);
     }
@@ -122,8 +122,8 @@ fn run_trinity_demo() -> std::io::Result<()> {
 
 fn run_demo_sql() -> std::io::Result<()> {
     println!("=== AETHER DB --demo-sql EN (SQL Inglés) ===\n");
-    let wal_path = std::env::temp_dir().join(format!("aether_demo_sql_{}.wal", std::process::id()));
-    let cat_path = std::env::temp_dir().join(format!("aether_catalog_{}.txt", std::process::id()));
+    let wal_path = std::env::temp_dir().join(format!("argentum_demo_sql_{}.wal", std::process::id()));
+    let cat_path = std::env::temp_dir().join(format!("argentum_catalog_{}.txt", std::process::id()));
     let _ = std::fs::remove_file(&wal_path);
     let _ = std::fs::remove_file(&cat_path);
     let wal = WalManager::open(wal_path.to_str().unwrap()).unwrap();
@@ -132,7 +132,7 @@ fn run_demo_sql() -> std::io::Result<()> {
     let db = Database::new(wal.clone(), bp.clone(), trinity, Some(cat_path.to_str().unwrap().into()));
     let exec = |sql: &str| {
         println!("> {}", sql);
-        match aether_engine::parser::parse(sql) {
+        match argentum_engine::parser::parse(sql) {
             Ok(plan) => match db.execute(plan) { Ok(res) => println!("{}\n", res.to_display()), Err(e) => println!("Error: {}\n", e), },
             Err(e) => println!("Error parse: {}\n", e),
         }
@@ -189,8 +189,8 @@ fn run_demo_sql() -> std::io::Result<()> {
 
 fn run_demo_es() -> std::io::Result<()> {
     println!("=== AETHER DB --demo-es ES (SQL Español 100% traducido) ===\n");
-    let wal_path = std::env::temp_dir().join(format!("aether_demo_es_{}.wal", std::process::id()));
-    let cat_path = std::env::temp_dir().join(format!("aether_catalog_es_{}.txt", std::process::id()));
+    let wal_path = std::env::temp_dir().join(format!("argentum_demo_es_{}.wal", std::process::id()));
+    let cat_path = std::env::temp_dir().join(format!("argentum_catalog_es_{}.txt", std::process::id()));
     let _ = std::fs::remove_file(&wal_path);
     let _ = std::fs::remove_file(&cat_path);
     let wal = WalManager::open(wal_path.to_str().unwrap()).unwrap();
@@ -199,7 +199,7 @@ fn run_demo_es() -> std::io::Result<()> {
     let db = Database::new(wal.clone(), bp.clone(), trinity, Some(cat_path.to_str().unwrap().into()));
     let exec = |sql: &str| {
         println!("> {}", sql);
-        match aether_engine::parser::parse(sql) {
+        match argentum_engine::parser::parse(sql) {
             Ok(plan) => match db.execute(plan) { Ok(res) => println!("{}\n", res.to_display()), Err(e) => println!("Error: {}\n", e), },
             Err(e) => println!("Error parse: {}\n", e),
         }
@@ -260,13 +260,13 @@ fn run_demo_es() -> std::io::Result<()> {
 fn run_repl() -> std::io::Result<()> {
     use std::io::{self, Write};
     println!("AETHER DB REPL v2.0 BILINGÜE ES/EN - HELP/AYUDA para ayuda, EXIT/SALIR para salir");
-    let wal_path = std::env::temp_dir().join(format!("aether_repl_{}.wal", std::process::id()));
-    let cat_path = std::env::temp_dir().join(format!("aether_repl_cat_{}.txt", std::process::id()));
+    let wal_path = std::env::temp_dir().join(format!("argentum_repl_{}.wal", std::process::id()));
+    let cat_path = std::env::temp_dir().join(format!("argentum_repl_cat_{}.txt", std::process::id()));
     let wal = WalManager::open(wal_path.to_str().unwrap()).unwrap();
     let bp = Arc::new(BufferPool::new(128));
     let trinity = TrinityIndex::new(bp.clone(), wal.clone());
     let db = Database::new(wal.clone(), bp.clone(), trinity, Some(cat_path.to_str().unwrap().into()));
-    let _ = aether_engine::parser::parse("CREATE TABLE productos (id INT PRIMARY KEY, nombre TEXT, descripcion TEXT, categoria_id INT, embedding VECTOR(768))").map(|p| db.execute(p));
+    let _ = argentum_engine::parser::parse("CREATE TABLE productos (id INT PRIMARY KEY, nombre TEXT, descripcion TEXT, categoria_id INT, embedding VECTOR(768))").map(|p| db.execute(p));
     let mut trinity_legacy = TrinityIndex::new(bp.clone(), wal.clone());
     let mut next_id: u64 = 100;
     loop {
@@ -340,7 +340,7 @@ fn run_repl() -> std::io::Result<()> {
             if res.is_empty() { println!("(sin resultados)"); } else { for (i,r) in res.iter().enumerate(){ println!("{}. BUSCA/SEARCH slot={} score={:.4}", i+1, r.slot_id, r.score_fused); } }
             continue;
         }
-        match aether_engine::parser::parse(cmd) {
+        match argentum_engine::parser::parse(cmd) {
             Ok(plan) => match db.execute(plan) { Ok(res) => println!("{}", res.to_display()), Err(e) => println!("Error: {}", e), },
             Err(e) => println!("Error parse: {} (HELP/AYUDA)", e),
         }
@@ -360,3 +360,4 @@ fn main() -> std::io::Result<()> {
     if args.iter().any(|a| a == "--repl") { return run_repl(); }
     eprintln!("Opción desconocida. Usa --help"); std::process::exit(1);
 }
+

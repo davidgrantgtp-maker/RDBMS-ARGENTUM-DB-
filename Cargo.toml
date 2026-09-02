@@ -1,22 +1,28 @@
 [workspace]
 members = [
-    "crates/aether-common",
-    "crates/aether-storage",
-    "crates/aether-index",
-    "crates/aether-engine",
-    "crates/aether-server",
+    "crates/argentum-common",
+    "crates/argentum-storage",
+    "crates/argentum-index",
+    "crates/argentum-engine",
+    "crates/argentum-server",
 ]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["AETHER DB Team"]
+authors = ["Argentum DB Team - La Primera Base de Datos Argentina, che!"]
 license = "Apache-2.0"
-repository = "https://github.com/aether-db/aether"
+repository = "https://github.com/argentum-db/argentum"
+description = "Argentum DB - La primera base de datos relacional argentina, con motor TRINITY y lenguaje bien argento, papá!"
 
 [workspace.dependencies]
-aether-common = { path = "crates/aether-common" }
-aether-storage = { path = "crates/aether-storage" }
-aether-index = { path = "crates/aether-index" }
-aether-engine = { path = "crates/aether-engine" }
+argentum-common = { path = "crates/argentum-common" }
+argentum-storage = { path = "crates/argentum-storage" }
+argentum-index = { path = "crates/argentum-index" }
+argentum-engine = { path = "crates/argentum-engine" }
+# alias para compatibilidad con código viejo
+aether-common = { path = "crates/argentum-common" }
+aether-storage = { path = "crates/argentum-storage" }
+aether-index = { path = "crates/argentum-index" }
+aether-engine = { path = "crates/argentum-engine" }

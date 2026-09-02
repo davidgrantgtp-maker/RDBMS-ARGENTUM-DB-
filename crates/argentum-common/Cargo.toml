@@ -1,6 +1,7 @@
 [package]
-name = "aether-common"
+name = "argentum-common"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
+

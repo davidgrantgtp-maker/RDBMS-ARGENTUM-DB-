@@ -1,7 +1,7 @@
 //! crates/aether-storage/src/wal/manager.rs:18 - WAL Manager con group commit
 //! Garantiza WAL-before-data y fsync por LSN. Un solo writer secuencial.
 
-use aether_common::Lsn;
+use argentum_common::Lsn;
 use crate::wal::record::WalRecord;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn wal_append_and_flush() {
-        let dir = std::env::temp_dir().join("aether_wal_test.log");
+        let dir = std::env::temp_dir().join("argentum_wal_test.log");
         let _ = std::fs::remove_file(&dir);
         let wal = WalManager::open(dir.to_str().unwrap()).unwrap();
         let lsn = wal.append(WalRecord::Begin { txn_id: 1, lsn: 0 }).unwrap();
@@ -128,3 +128,4 @@ mod tests {
         let _ = std::fs::remove_file(&dir);
     }
 }
+

@@ -1,7 +1,9 @@
 [package]
-name = "aether-storage"
+name = "argentum-storage"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-aether-common = { workspace = true }
+argentum-common = { workspace = true }
+
+

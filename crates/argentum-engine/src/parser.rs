@@ -4,7 +4,7 @@
 //! Sin dependencia externa (offline). Case-insensitive, con y sin tildes.
 
 use crate::{LogicalPlan, Projection, OrderBy};
-use aether_common::catalog::{ColumnDef, DataType, IdentitySpec};
+use argentum_common::catalog::{ColumnDef, DataType, IdentitySpec};
 
 fn trim_semicolon(s: &str) -> &str {
     s.trim().trim_end_matches(';').trim()
@@ -938,3 +938,4 @@ mod tests {
         }
     }
 }
+

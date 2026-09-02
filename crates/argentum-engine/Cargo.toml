@@ -1,0 +1,11 @@
+[package]
+name = "argentum-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+argentum-common = { workspace = true }
+argentum-storage = { workspace = true }
+argentum-index = { workspace = true }
+
+

@@ -1,9 +1,9 @@
 //! tests/integration_trinity.rs - Validación TRINITY con 1000 vectores y recall vs brute force
 //! Ejecuta: cargo test -p aether-index --test integration_trinity -- --nocapture
 
-use aether_index::{SearchParams, TrinityIndex};
-use aether_storage::buffer_pool::BufferPool;
-use aether_storage::wal::WalManager;
+use argentum_index::{SearchParams, TrinityIndex};
+use argentum_storage::buffer_pool::BufferPool;
+use argentum_storage::wal::WalManager;
 use std::sync::Arc;
 
 /// PRNG determinista LCG (evita dependencia rand)
@@ -38,7 +38,7 @@ fn brute_force_topk(vectors: &[Vec<f32>], query: &[f32], k: usize) -> Vec<(usize
 
 #[test]
 fn trinity_insert_1000_and_search_recall() {
-    let tmp = std::env::temp_dir().join(format!("aether_integ_{}.wal", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("argentum_integ_{}.wal", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let wal = WalManager::open(tmp.to_str().unwrap()).unwrap();
     let bp = Arc::new(BufferPool::new(2048));
@@ -120,7 +120,7 @@ fn trinity_insert_1000_and_search_recall() {
 #[test]
 fn trinity_recall_vs_brute_force_pq_consistency() {
     // Test más estricto: inserta 100 vectores idénticos + 1 outlier, verifica que outlier sea encontrado
-    let tmp = std::env::temp_dir().join(format!("aether_recall2_{}.wal", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("argentum_recall2_{}.wal", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let wal = WalManager::open(tmp.to_str().unwrap()).unwrap();
     let bp = Arc::new(BufferPool::new(128));
@@ -155,7 +155,7 @@ fn trinity_recall_vs_brute_force_pq_consistency() {
 
 #[test]
 fn trinity_bm25_and_vector_fusion() {
-    let tmp = std::env::temp_dir().join(format!("aether_fusion_{}.wal", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("argentum_fusion_{}.wal", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let wal = WalManager::open(tmp.to_str().unwrap()).unwrap();
     let bp = Arc::new(BufferPool::new(64));
@@ -183,3 +183,4 @@ fn trinity_bm25_and_vector_fusion() {
 
     let _ = std::fs::remove_file(&tmp);
 }
+

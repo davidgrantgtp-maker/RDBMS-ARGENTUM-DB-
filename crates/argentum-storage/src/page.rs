@@ -1,7 +1,7 @@
 //! crates/aether-storage/src/page.rs:30 - Layout físico de página TRINITY 16KB
 //! Diseño PAX + Index-Organized. Inspirado en PostgreSQL PageHeader + DuckDB PAX.
 
-use aether_common::{PageId, Lsn, PAGE_SIZE, TupleHeader, TxnId};
+use argentum_common::{PageId, Lsn, PAGE_SIZE, TupleHeader, TxnId};
 use std::mem::size_of;
 
 pub type SlotId = u16;
@@ -240,7 +240,7 @@ impl TrinityPage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_common::{TupleHeader, Rid};
+    use argentum_common::{TupleHeader, Rid};
 
     #[test]
     fn page_insert_and_visibility() {
@@ -258,3 +258,4 @@ mod tests {
         assert!(p.is_visible(sid, 0, 20, &[15]));
     }
 }
+

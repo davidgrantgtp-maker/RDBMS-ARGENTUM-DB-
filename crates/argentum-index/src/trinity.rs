@@ -2,10 +2,10 @@
 //! Coordina B+Tree + Micro-HNSW por página + BM25 local + CSR grafo.
 //! Complejidad: O(log_f N + log M_page) vs O(N) tradicional.
 
-use aether_common::{PageId, TxnId};
-use aether_storage::page::TrinityPayload;
-use aether_storage::buffer_pool::BufferPool;
-use aether_storage::wal::WalManager;
+use argentum_common::{PageId, TxnId};
+use argentum_storage::page::TrinityPayload;
+use argentum_storage::buffer_pool::BufferPool;
+use argentum_storage::wal::WalManager;
 use crate::hnsw::MicroHnsw;
 use crate::pq::Codebook;
 use std::collections::HashMap;
@@ -193,13 +193,13 @@ impl TrinityIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_storage::buffer_pool::BufferPool;
-    use aether_storage::wal::WalManager;
+    use argentum_storage::buffer_pool::BufferPool;
+    use argentum_storage::wal::WalManager;
 
     #[test]
     fn trinity_search_empty() {
         let bp = Arc::new(BufferPool::new(128));
-        let wal = WalManager::open(std::env::temp_dir().join("aether_trinity_test.wal").to_str().unwrap()).unwrap();
+        let wal = WalManager::open(std::env::temp_dir().join("argentum_trinity_test.wal").to_str().unwrap()).unwrap();
         let idx = TrinityIndex::new(bp, wal);
         let params = SearchParams {
             query_vector: Some(vec![0.0; 768]),
@@ -215,3 +215,4 @@ mod tests {
         assert!(idx.estimate_cost(&params) >= 0.0);
     }
 }
+

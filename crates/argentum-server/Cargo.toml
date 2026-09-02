@@ -1,0 +1,16 @@
+[package]
+name = "argentum-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "argentum-server"
+path = "src/main.rs"
+
+[dependencies]
+argentum-common = { workspace = true }
+argentum-storage = { workspace = true }
+argentum-index = { workspace = true }
+argentum-engine = { workspace = true }
+
+

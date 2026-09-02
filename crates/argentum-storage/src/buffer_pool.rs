@@ -1,7 +1,7 @@
 //! crates/aether-storage/src/buffer_pool.rs:15 - Buffer Pool con clock sweep
 //! Maneja fix/unfix de páginas TRINITY con pin count + dirty flag + LSN.
 
-use aether_common::PageId;
+use argentum_common::PageId;
 use crate::page::Page;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -78,3 +78,4 @@ impl BufferPool {
         Ok(())
     }
 }
+

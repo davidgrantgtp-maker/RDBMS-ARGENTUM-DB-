@@ -1,6 +1,6 @@
 //! crates/aether-storage/src/wal/record.rs:12 - Formato físico WAL (ARIES)
 
-use aether_common::{Lsn, PageId, TxnId};
+use argentum_common::{Lsn, PageId, TxnId};
 
 #[derive(Debug, Clone)]
 pub enum WalRecord {
@@ -158,3 +158,4 @@ fn crc32fast(data: &[u8]) -> u32 {
     }
     h
 }
+
