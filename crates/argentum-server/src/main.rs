@@ -265,29 +265,176 @@ fn run_demo_es() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Render prompt con nombre de base actual.
-fn repl_prompt(current_db: &str) {
+/// Render prompt con usuario y base actual: argentum[user@db]>
+fn repl_prompt(username: &str, current_db: &str) {
     use std::io::Write;
-    print!("argentum[{}]> ", current_db);
+    print!("argentum[{}@{}]> ", username, current_db);
     let _ = std::io::stdout().flush();
 }
 
-fn handle_db_plan(mgr: &mut argentum_engine::DatabaseManager, plan: &argentum_engine::LogicalPlan) -> Option<String> {
+/// Planes de seguridad: chequea privilegio y ejecuta contra AuthCatalog.
+fn handle_secure_plan(
+    mgr: &mut argentum_engine::DatabaseManager,
+    session: &argentum_engine::SessionContext,
+    plan: &argentum_engine::LogicalPlan,
+) -> Option<String> {
     use argentum_engine::LogicalPlan;
+    // Self-service: cambiar la propia password no exige CREATE_USER.
+    if let LogicalPlan::SetPassword { name, new_password } = plan {
+        if name.to_lowercase() == session.username.to_lowercase() {
+            return Some(match mgr.auth_mut().set_password(name, new_password) {
+                Ok(_) => "Password actualizado / password updated".into(),
+                Err(e) => format!("Error: {}", e),
+            });
+        }
+    }
+    if let Err(e) = mgr.check_plan(session, plan) {
+        return Some(format!("Error: {}", e));
+    }
     match plan {
-        LogicalPlan::CreateDatabase { name } => match mgr.create_database(name) {
-            Ok(_) => Some(format!("Base '{}' creada / database created", name)),
-            Err(e) => Some(format!("Error: {}", e)),
-        },
-        LogicalPlan::DropDatabase { name } => match mgr.drop_database(name) {
-            Ok(_) => Some(format!("Base '{}' borrada / database dropped", name)),
-            Err(e) => Some(format!("Error: {}", e)),
-        },
-        LogicalPlan::UseDatabase { name } => match mgr.use_database(name) {
-            Ok(_) => Some(format!("Usando base '{}' / switched to database '{}'", name, name)),
-            Err(e) => Some(format!("Error: {}", e)),
-        },
+        LogicalPlan::CreateUser { name, password, superuser } => {
+            Some(match mgr.auth_mut().create_user(name, password, *superuser) {
+                Ok(_) => format!("Usuario '{}' creado / user created", name),
+                Err(e) => format!("Error: {}", e),
+            })
+        }
+        LogicalPlan::DropUser { name } => Some(match mgr.auth_mut().drop_user(name) {
+            Ok(_) => format!("Usuario '{}' borrado / user dropped", name),
+            Err(e) => format!("Error: {}", e),
+        }),
+        LogicalPlan::SetPassword { name, new_password } => {
+            Some(match mgr.auth_mut().set_password(name, new_password) {
+                Ok(_) => "Password actualizado / password updated".into(),
+                Err(e) => format!("Error: {}", e),
+            })
+        }
+        LogicalPlan::CreateGroup { name, description } => {
+            Some(match mgr.auth_mut().create_group(name, description) {
+                Ok(_) => format!("Grupo '{}' creado / group created", name),
+                Err(e) => format!("Error: {}", e),
+            })
+        }
+        LogicalPlan::DropGroup { name } => Some(match mgr.auth_mut().drop_group(name) {
+            Ok(_) => format!("Grupo '{}' borrado / group dropped", name),
+            Err(e) => format!("Error: {}", e),
+        }),
+        LogicalPlan::AddMember { user, group } => {
+            Some(match mgr.auth_mut().add_member(user, group) {
+                Ok(_) => format!("'{}' agregado a '{}' / added", user, group),
+                Err(e) => format!("Error: {}", e),
+            })
+        }
+        LogicalPlan::RemoveMember { user, group } => {
+            Some(match mgr.auth_mut().remove_member(user, group) {
+                Ok(_) => format!("'{}' quitado de '{}' / removed", user, group),
+                Err(e) => format!("Error: {}", e),
+            })
+        }
+        LogicalPlan::Grant { privilege, grantee, db, table } => {
+            Some(match mgr.auth_mut().grant(privilege.clone(), grantee.clone(), db.as_deref(), table.as_deref()) {
+                Ok(_) => "GRANT OK / permiso otorgado".into(),
+                Err(e) => format!("Error: {}", e),
+            })
+        }
+        LogicalPlan::Revoke { privilege, grantee, db, table } => {
+            Some(match mgr.auth_mut().revoke(privilege.clone(), grantee.clone(), db.as_deref(), table.as_deref()) {
+                Ok(_) => "REVOKE OK / permiso revocado".into(),
+                Err(e) => format!("Error: {}", e),
+            })
+        }
+        LogicalPlan::ShowUsers => {
+            let mut s = String::from("Usuarios / Users:\n");
+            for u in mgr.auth().list_users() {
+                s.push_str(&format!(
+                    "- {} (superuser: {}, disabled: {}, grupos: {})\n",
+                    u.display,
+                    if u.is_superuser { "sí" } else { "no" },
+                    if u.disabled { "sí" } else { "no" },
+                    if u.groups.is_empty() { "-".into() } else { u.groups.join(",") }
+                ));
+            }
+            Some(s)
+        }
+        LogicalPlan::ShowGroups => {
+            let mut s = String::from("Grupos / Groups:\n");
+            for g in mgr.auth().list_groups() {
+                s.push_str(&format!("- {} ({})\n", g.display, g.description));
+            }
+            Some(s)
+        }
+        LogicalPlan::ShowGrants { grantee } => {
+            let mut s = String::from("Permisos / Grants:\n");
+            let grants = match grantee {
+                Some(g) => mgr.auth().grants_for(g),
+                None => mgr.auth().all_grants(),
+            };
+            for gr in &grants {
+                let who = match &gr.grantee {
+                    argentum_common::auth::Grantee::User(n) => format!("USER {}", n),
+                    argentum_common::auth::Grantee::Group(n) => format!("GROUP {}", n),
+                };
+                let scope = match (&gr.db, &gr.table) {
+                    (Some(d), Some(t)) => format!(" ON {}.{}", d, t),
+                    (Some(d), None) => format!(" ON {}.*", d),
+                    _ => String::new(),
+                };
+                s.push_str(&format!("- GRANT {}{} TO {}\n", gr.privilege.as_str(), scope, who));
+            }
+            if grants.is_empty() {
+                s.push_str("(sin grants)\n");
+            }
+            Some(s)
+        }
+        _ => None,
+    }
+}
+
+fn handle_db_plan(
+    mgr: &mut argentum_engine::DatabaseManager,
+    session: &argentum_engine::SessionContext,
+    plan: &argentum_engine::LogicalPlan,
+) -> Option<String> {
+    use argentum_engine::LogicalPlan;
+    // Seguridad primero: planes de seguridad y de base exigen privilegio.
+    if let Some(out) = handle_secure_plan(mgr, session, plan) {
+        return Some(out);
+    }
+    match plan {
+        LogicalPlan::CreateDatabase { name } => {
+            if let Err(e) = mgr.check_plan(session, plan) {
+                return Some(format!("Error: {}", e));
+            }
+            match mgr.create_database(name) {
+                Ok(_) => {
+                    // Auto-USE a la base recién creada (flujo MySQL-like).
+                    let _ = mgr.use_database(name);
+                    Some(format!("Base '{}' creada y en uso / database created and in use", name))
+                }
+                Err(e) => Some(format!("Error: {}", e)),
+            }
+        }
+        LogicalPlan::DropDatabase { name } => {
+            if let Err(e) = mgr.check_plan(session, plan) {
+                return Some(format!("Error: {}", e));
+            }
+            match mgr.drop_database(name) {
+                Ok(_) => Some(format!("Base '{}' borrada / database dropped", name)),
+                Err(e) => Some(format!("Error: {}", e)),
+            }
+        }
+        LogicalPlan::UseDatabase { name } => {
+            if let Err(e) = mgr.check_plan(session, plan) {
+                return Some(format!("Error: {}", e));
+            }
+            match mgr.use_database(name) {
+                Ok(_) => Some(format!("Usando base '{}' / switched to database '{}'", name, name)),
+                Err(e) => Some(format!("Error: {}", e)),
+            }
+        }
         LogicalPlan::ShowDatabases => {
+            if let Err(e) = mgr.check_plan(session, plan) {
+                return Some(format!("Error: {}", e));
+            }
             let dbs = mgr.show_databases();
             let mut s = String::from("Bases de datos / Databases:\n");
             for d in &dbs {
@@ -298,28 +445,23 @@ fn handle_db_plan(mgr: &mut argentum_engine::DatabaseManager, plan: &argentum_en
             Some(s)
         }
         LogicalPlan::ShowTables => {
-            if let Some(db) = mgr.current() {
-                let plan = argentum_engine::LogicalPlan::ShowTables;
-                match db.execute(plan) {
-                    Ok(argentum_engine::ExecutionResult::Selected { columns, rows }) => {
-                        let mut s = String::from("Tablas de la base activa / Tables in current database:\n");
-                        // Header
-                        s.push_str(&format!("{}\n", columns.join(" | ")));
-                        s.push_str(&"-".repeat(s.len()));
-                        s.push('\n');
-                        for row in &rows {
-                            let vals: Vec<String> = columns.iter().map(|c| {
-                                row.get(c).map(|v| format!("{}", v)).unwrap_or_default()
-                            }).collect();
-                            s.push_str(&format!("{}\n", vals.join(" | ")));
-                        }
-                        Some(s)
+            match mgr.execute_current(session, argentum_engine::LogicalPlan::ShowTables) {
+                Ok(argentum_engine::ExecutionResult::Selected { columns, rows }) => {
+                    let mut s = String::from("Tablas de la base activa / Tables in current database:\n");
+                    // Header
+                    s.push_str(&format!("{}\n", columns.join(" | ")));
+                    s.push_str(&"-".repeat(s.len()));
+                    s.push('\n');
+                    for row in &rows {
+                        let vals: Vec<String> = columns.iter().map(|c| {
+                            row.get(c).map(|v| format!("{}", v)).unwrap_or_default()
+                        }).collect();
+                        s.push_str(&format!("{}\n", vals.join(" | ")));
                     }
-                    Ok(other) => Some(format!("{:?}", other)),
-                    Err(e) => Some(format!("Error: {}", e)),
+                    Some(s)
                 }
-            } else {
-                Some("No hay base activa / No current database".into())
+                Ok(other) => Some(format!("{:?}", other)),
+                Err(e) => Some(format!("Error: {}", e)),
             }
         }
         _ => None,
@@ -332,9 +474,14 @@ fn run_repl() -> std::io::Result<()> {
 }
 
 fn run_repl_with_dir(data_dir: Option<&str>) -> std::io::Result<()> {
+    run_repl_full(data_dir, None, None)
+}
+
+fn run_repl_full(data_dir: Option<&str>, user: Option<&str>, password: Option<&str>) -> std::io::Result<()> {
     use std::io::{self, Write};
-    println!("Argentum DB REPL v3.0 BILINGÜE ES/EN + multi-base");
+    println!("Argentum DB REPL v4.0 BILINGÜE ES/EN + multi-base + seguridad");
     println!("HELP/AYUDA para ayuda, EXIT/SALIR para salir");
+    println!("LOGIN <usuario> <password> para cambiar de usuario. Usuario inicial: root/root (cambiar en producción).");
     // Base del REPL: --data-dir <path> si se pasó, si no ./data/repl_<pid>/.
     // Con --data-dir los datos persisten entre invocaciones (útil para tests y
     // para usar Argentum como almacenamiento real entre sesiones).
@@ -343,6 +490,24 @@ fn run_repl_with_dir(data_dir: Option<&str>) -> std::io::Result<()> {
         .unwrap_or_else(|| format!("./data/repl_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&base_dir);
     let mut mgr = argentum_engine::DatabaseManager::new(&base_dir);
+    // Sesión: --user/--password si se pasaron, si no root bootstrap (compatibilidad).
+    // En producción usar un usuario no-root y cambiar password de root.
+    let mut session = match (user, password) {
+        (Some(u), Some(p)) => match mgr.authenticate(u, p) {
+            Ok(s) => {
+                println!("Autenticado como '{}' / authenticated", s.username);
+                s
+            }
+            Err(e) => {
+                eprintln!("Login inicial falló ({}). Se usa root bootstrap solo para esta sesión.", e);
+                argentum_engine::SessionContext::bootstrap_root()
+            }
+        },
+        _ => {
+            println!("AVISO: sesión bootstrap 'root'. Usá LOGIN <usuario> <password> y cambiá root/root en producción.");
+            argentum_engine::SessionContext::bootstrap_root()
+        }
+    };
     // Crear tabla de ejemplo "productos" en la base activa si no existe.
     if let Some(db) = mgr.current() {
         let plan_sql = "CREATE TABLE productos (id INT PRIMARY KEY, nombre TEXT, descripcion TEXT, categoria_id INT, embedding VECTOR(768))";
@@ -355,7 +520,7 @@ fn run_repl_with_dir(data_dir: Option<&str>) -> std::io::Result<()> {
     let mut trinity_legacy = TrinityIndex::new(bp_legacy, wal_legacy);
     let mut next_id: u64 = 100;
     loop {
-        repl_prompt(mgr.current_db());
+        repl_prompt(&session.username, mgr.current_db());
         io::stdout().flush().unwrap();
         let mut line = String::new();
         if io::stdin().read_line(&mut line).is_err() { break; }
@@ -363,6 +528,26 @@ fn run_repl_with_dir(data_dir: Option<&str>) -> std::io::Result<()> {
         if cmd.is_empty() { continue; }
         let up = cmd.to_uppercase();
         if up == "EXIT" || up == "SALIR" || up == "QUIT" || up == "\\Q" { break; }
+        // LOGIN <user> <password> / QUIENSOY / WHOAMI
+        if up.starts_with("LOGIN ") || up.starts_with("ENTRAR ") {
+            let parts: Vec<&str> = cmd.split_whitespace().collect();
+            if parts.len() < 3 {
+                println!("Uso: LOGIN <usuario> <password>");
+                continue;
+            }
+            match mgr.authenticate(parts[1], parts[2]) {
+                Ok(s) => {
+                    println!("Autenticado como '{}'", s.username);
+                    session = s;
+                }
+                Err(e) => println!("Error: {}", e),
+            }
+            continue;
+        }
+        if up == "QUIENSOY" || up == "WHOAMI" || up == "CURRENT_USER" {
+            println!("{} (superuser: {})", session.username, if session.is_superuser { "sí" } else { "no" });
+            continue;
+        }
         if up == "HELP" || up == "AYUDA" {
             println!("SQL BILINGÜE:");
             println!("  CREA TABLA / CREATE TABLE  |  CAMBIA TABLA / ALTER TABLE  |  BORRA TABLA / DROP TABLE");
@@ -376,6 +561,16 @@ fn run_repl_with_dir(data_dir: Option<&str>) -> std::io::Result<()> {
             println!("  BORRA BASE mi_tienda     | DROP DATABASE my_store");
             println!("  MUESTRA BASES            | SHOW DATABASES");
             println!("  (siempre existe 'default')");
+            println!("Seguridad / Security (requiere privilegio):");
+            println!("  LOGIN <usuario> <password> | QUIENSOY / WHOAMI");
+            println!("  CREATE USER ana IDENTIFIED BY 'x' | CREA USUARIO ana IDENTIFICADO POR 'x'");
+            println!("  DROP USER ana | BORRA USUARIO ana");
+            println!("  SET PASSWORD FOR ana = 'y' | CAMBIA CONTRASEÑA DE ana A 'y'");
+            println!("  CREATE GROUP ventas | CREA GRUPO ventas | CREATE ROLE admin");
+            println!("  ADD USER ana TO GROUP ventas | AGREGA USUARIO ana A GRUPO ventas");
+            println!("  GRANT SELECT ON ventas.* TO GROUP ventas | OTORGA SELECT EN ventas.* A GRUPO ventas");
+            println!("  REVOKE SELECT ON ventas.* FROM GROUP ventas | REVOCA ... DE ...");
+            println!("  SHOW USERS | MUESTRA USUARIOS | SHOW GROUPS | SHOW GRANTS");
             println!("Ejemplos:");
             println!("  CREA TABLA t (id INT, nombre TEXT)");
             println!("  MUESTRA TABLA t  /  DESCRIBE TABLA t  /  ESTRUCTURA t  /  MUESTRA ESTRUCTURA DE TABLA t");
@@ -403,10 +598,16 @@ fn run_repl_with_dir(data_dir: Option<&str>) -> std::io::Result<()> {
             println!("Trinity: {} tuplas {} páginas", trinity_legacy.num_tuples, trinity_legacy.num_pages);
             continue;
         }
-        // Shortcuts INSERT/AGREGAR con pipes (sin pasar por parser)
+        // Shortcuts INSERT/AGREGAR con pipes (con chequeo de privilegios, sin bypass)
         if (up.starts_with("INSERT ") || up.starts_with("AGREGAR ") || up.starts_with("AGREGA ")) && !up.starts_with("INSERT INTO") && !up.starts_with("AGREGAR EN") {
             let payload = if up.starts_with("INSERT ") { &cmd[7..] } else if up.starts_with("AGREGAR ") { &cmd[8..] } else { &cmd[7..] };
             if payload.contains('|') {
+                // Enforcement: equivale a INSERT en productos de la base activa.
+                let probe = argentum_engine::LogicalPlan::Insert { table: "productos".into(), columns: vec![], values: vec![] };
+                if let Err(e) = mgr.check_plan(&session, &probe) {
+                    println!("Error: {}", e);
+                    continue;
+                }
                 let parts: Vec<&str> = payload.split('|').collect();
                 if parts.len() != 3 { println!("Uso: INSERT <nombre> | <desc> | <cat>  o  AGREGAR <nombre> | <desc> | <cat>"); continue; }
                 let nombre = parts[0].trim(); let desc = parts[1].trim(); let cat: i64 = parts[2].trim().parse().unwrap_or(5);
@@ -432,8 +633,17 @@ fn run_repl_with_dir(data_dir: Option<&str>) -> std::io::Result<()> {
                 continue;
             }
         }
-        // Shortcuts SEARCH/BUSCA sin asterisco
+        // Shortcuts SEARCH/BUSCA sin asterisco (legacy TRINITY; exige SEARCH o SELECT)
         if (up.starts_with("SEARCH ") || up.starts_with("BUSCA ") || up.starts_with("BUSCAR ")) && !up.starts_with("SEARCH *") && !up.starts_with("BUSCA *") {
+            let probe = argentum_engine::LogicalPlan::Select {
+                table: "productos".into(),
+                projection: argentum_engine::Projection::Star,
+                where_clause: None, group_by: None, order_by: None, limit: None, is_search: true,
+            };
+            if let Err(e) = mgr.check_plan(&session, &probe) {
+                println!("Error: {}", e);
+                continue;
+            }
             let q = if up.starts_with("SEARCH ") { &cmd[7..] } else if up.starts_with("BUSCA ") { &cmd[6..] } else { &cmd[7..] };
             let qvec = embed(q, 768);
             let params = SearchParams{ query_vector: Some(qvec), query_text: Some(q.to_string()), top_k: 5, ef_search: 64, alpha_bm25: 0.4, alpha_vector: 0.6, txn_snapshot: (0,1000,vec![]) };
@@ -441,21 +651,17 @@ fn run_repl_with_dir(data_dir: Option<&str>) -> std::io::Result<()> {
             if res.is_empty() { println!("(sin resultados)"); } else { for (i,r) in res.iter().enumerate(){ println!("{}. BUSCA/SEARCH slot={} score={:.4}", i+1, r.slot_id, r.score_fused); } }
             continue;
         }
-        // SQL estándar: primero detectamos planes de base de datos
+        // SQL estándar: planes de base/seguridad primero, resto con enforcement.
         match argentum_engine::parser::parse(cmd) {
             Ok(plan) => {
-                if let Some(out) = handle_db_plan(&mut mgr, &plan) {
+                if let Some(out) = handle_db_plan(&mut mgr, &session, &plan) {
                     println!("{}", out);
                     continue;
                 }
-                // Si no es plan de BD, delegamos a la base activa.
-                if let Some(db) = mgr.current() {
-                    match db.execute(plan) {
-                        Ok(res) => println!("{}", res.to_display()),
-                        Err(e) => println!("Error: {}", e),
-                    }
-                } else {
-                    println!("Error: No hay base activa / no current database");
+                // Si no es plan de BD/seguridad, delegamos con chequeo de privilegios.
+                match mgr.execute_current(&session, plan) {
+                    Ok(res) => println!("{}", res.to_display()),
+                    Err(e) => println!("Error: {}", e),
                 }
             }
             Err(e) => println!("Error parse: {} (HELP/AYUDA)", e),
@@ -478,7 +684,15 @@ fn main() -> std::io::Result<()> {
             .position(|a| a == "--data-dir")
             .and_then(|i| args.get(i + 1))
             .cloned();
-        return run_repl_with_dir(data_dir.as_deref());
+        let user = args.iter()
+            .position(|a| a == "--user" || a == "-u")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        let password = args.iter()
+            .position(|a| a == "--password" || a == "-p")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        return run_repl_full(data_dir.as_deref(), user.as_deref(), password.as_deref());
     }
     eprintln!("Opción desconocida. Usa --help"); std::process::exit(1);
 }

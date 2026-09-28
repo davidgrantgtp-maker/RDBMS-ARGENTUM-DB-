@@ -4,6 +4,7 @@
 //! Sin dependencia externa (offline). Case-insensitive, con y sin tildes.
 
 use crate::{LogicalPlan, Projection, OrderBy};
+use argentum_common::auth::{Grantee, Privilege};
 use argentum_common::catalog::{ColumnDef, DataType, IdentitySpec};
 
 fn trim_semicolon(s: &str) -> &str {
@@ -308,6 +309,11 @@ pub fn parse(sql: &str) -> Result<LogicalPlan, String> {
         return Ok(LogicalPlan::UseDatabase { name });
     }
 
+    // Seguridad empresarial (antes de DESCRIBE: SHOW USERS/GROUPS/GRANTS no es DESCRIBE TABLE)
+    if let Some(res) = parse_security(trimmed, &upper) {
+        return res;
+    }
+
     // DESCRIBE / MUESTRA / ESTRUCTURA / ESQUEMA / SHOW - comando para ver estructura (ES) - debe ir primero
     let describe_prefixes = ["DESCRIBE", "SHOW", "MUESTRA", "MOSTRAR", "ESTRUCTURA", "ESQUEMA"];
     let up_trim = upper.trim_start();
@@ -378,6 +384,259 @@ pub fn parse(sql: &str) -> Result<LogicalPlan, String> {
         return parse_select(trimmed, false);
     }
     Err(format!("Comando no soportado: {}", trimmed.split_whitespace().next().unwrap_or("")))
+}
+
+/// Seguridad: parsea DDL de usuarios/grupos/grants (EN + ES). Devuelve None si no es comando de seguridad.
+fn parse_security(sql: &str, upper: &str) -> Option<Result<LogicalPlan, String>> {
+    let u = upper.trim();
+    // SHOW USERS / GROUPS / GRANTS
+    if matches!(u, "SHOW USERS" | "MUESTRA USUARIOS" | "MOSTRAR USUARIOS" | "LISTA USUARIOS" | "VER USUARIOS") {
+        return Some(Ok(LogicalPlan::ShowUsers));
+    }
+    if matches!(u, "SHOW GROUPS" | "SHOW ROLES" | "MUESTRA GRUPOS" | "MUESTRA ROLES" | "MOSTRAR GRUPOS" | "LISTA GRUPOS") {
+        return Some(Ok(LogicalPlan::ShowGroups));
+    }
+    if u == "SHOW GRANTS" || u == "MUESTRA PERMISOS" || u == "MOSTRAR PERMISOS" || u == "VER PERMISOS" {
+        return Some(Ok(LogicalPlan::ShowGrants { grantee: None }));
+    }
+    if let Some(rest) = strip_prefix_ci(sql, "SHOW GRANTS FOR GROUP")
+        .or_else(|| strip_prefix_ci(sql, "SHOW GRANTS FOR"))
+        .or_else(|| strip_prefix_ci(sql, "MUESTRA PERMISOS DE GRUPO"))
+        .or_else(|| strip_prefix_ci(sql, "MUESTRA PERMISOS DE"))
+    {
+        let name = extract_table_name(rest);
+        if name.is_empty() {
+            return Some(Err("SHOW GRANTS falta usuario/grupo".into()));
+        }
+        let is_group = u.contains("GROUP") || u.contains("GRUPO");
+        let g = if is_group { Grantee::Group(name) } else { Grantee::User(name) };
+        return Some(Ok(LogicalPlan::ShowGrants { grantee: Some(g) }));
+    }
+    // CREATE USER / CREA USUARIO
+    if let Some(rest) = strip_prefix_any(sql, &["CREATE USER", "CREA USUARIO", "CREAR USUARIO", "CREATE USUARIO"]).map(|(r, _)| r) {
+        return Some(parse_create_user(rest));
+    }
+    // DROP USER / BORRA USUARIO
+    if let Some(rest) = strip_prefix_any(sql, &["DROP USER", "BORRA USUARIO", "ELIMINA USUARIO", "BORRAR USUARIO", "ELIMINAR USUARIO"]).map(|(r, _)| r) {
+        let name = extract_table_name(rest);
+        if name.is_empty() {
+            return Some(Err("DROP USER falta nombre".into()));
+        }
+        return Some(Ok(LogicalPlan::DropUser { name }));
+    }
+    // SET PASSWORD / CAMBIA CONTRASEÑA
+    if let Some(rest) = strip_prefix_any(sql, &["SET PASSWORD FOR", "CAMBIA CONTRASEÑA DE", "CAMBIA CONTRASENA DE", "CAMBIAR CONTRASEÑA DE"]).map(|(r, _)| r) {
+        return Some(parse_set_password(rest));
+    }
+    // CREATE GROUP/ROLE / CREA GRUPO/ROL
+    if let Some(rest) = strip_prefix_any(sql, &["CREATE GROUP", "CREATE ROLE", "CREA GRUPO", "CREA ROL", "CREAR GRUPO", "CREAR ROL"]).map(|(r, _)| r) {
+        let name = extract_table_name(rest);
+        if name.is_empty() {
+            return Some(Err("CREATE GROUP falta nombre".into()));
+        }
+        return Some(Ok(LogicalPlan::CreateGroup { name, description: String::new() }));
+    }
+    // DROP GROUP/ROLE
+    if let Some(rest) = strip_prefix_any(sql, &["DROP GROUP", "DROP ROLE", "BORRA GRUPO", "BORRA ROL", "ELIMINA GRUPO", "ELIMINA ROL"]).map(|(r, _)| r) {
+        let name = extract_table_name(rest);
+        if name.is_empty() {
+            return Some(Err("DROP GROUP falta nombre".into()));
+        }
+        return Some(Ok(LogicalPlan::DropGroup { name }));
+    }
+    // ADD MEMBER: ADD USER x TO GROUP y / AGREGA USUARIO x A GRUPO y
+    if let Some(rest) = strip_prefix_any(sql, &["ADD USER", "AGREGA USUARIO", "AGREGAR USUARIO"]).map(|(r, _)| r) {
+        return Some(parse_add_member(rest));
+    }
+    if let Some(rest) = strip_prefix_any(sql, &["REMOVE USER", "REMOVE MEMBER", "QUITA USUARIO", "QUITAR USUARIO"]).map(|(r, _)| r) {
+        return Some(parse_remove_member(rest));
+    }
+    // GRANT / OTORGA - REVOCA / REVOKE
+    if u.starts_with("GRANT ") || u.starts_with("OTORGA ") || u.starts_with("OTORGAR ") {
+        return Some(parse_grant(sql, false));
+    }
+    if u.starts_with("REVOKE ") || u.starts_with("REVOCA ") || u.starts_with("REVOCAR ") {
+        return Some(parse_grant(sql, true));
+    }
+    None
+}
+
+fn unquote(s: &str) -> String {
+    s.trim().trim_matches(|c| c == '"' || c == '\'' || c == '`').to_string()
+}
+
+fn parse_create_user(rest: &str) -> Result<LogicalPlan, String> {
+    // Formas: `ana IDENTIFIED BY 'x'` / `ana IDENTIFICADO POR 'x'` / `ana PASSWORD 'x'` / `ana SUPERUSER`
+    let up = rest.to_uppercase();
+    let superuser = up.contains("SUPERUSER") || up.contains("SUPERUSUARIO") || up.contains("ADMINISTRADOR") || up.contains("ADMIN ");
+    // Buscar password tras BY / POR / PASSWORD / CONTRASEÑA
+    let mut password = String::new();
+    for kw in ["IDENTIFIED BY", "IDENTIFICADO POR", "IDENTIFICADA POR", "PASSWORD", "CONTRASEÑA", "CONTRASENA", " POR "] {
+        if let Some(idx) = up.find(kw) {
+            let after = rest[idx + kw.len()..].trim();
+            // password es primer token (con o sin comillas); resto puede traer SUPERUSER
+            let tok = after.split_whitespace().next().unwrap_or("");
+            // Si kw fue " POR " y tok es parte de "POR ..." sin password, ignorar
+            if kw == " POR " && (tok.eq_ignore_ascii_case("SUPERUSER") || tok.is_empty()) {
+                continue;
+            }
+            password = unquote(tok);
+            break;
+        }
+    }
+    // Nombre = primer token antes de keywords
+    let first = rest.split_whitespace().next().unwrap_or("");
+    let name = unquote(first);
+    if name.is_empty() {
+        return Err("CREATE USER falta nombre / CREA USUARIO falta nombre".into());
+    }
+    if password.is_empty() {
+        return Err("CREATE USER requiere password: IDENTIFIED BY 'x' / IDENTIFICADO POR 'x'".into());
+    }
+    Ok(LogicalPlan::CreateUser { name, password, superuser })
+}
+
+fn parse_set_password(rest: &str) -> Result<LogicalPlan, String> {
+    // `ana = 'x'` / `ana TO 'x'` / `ana A 'x'`
+    let up = rest.to_uppercase();
+    // nombre = primer token
+    let name = unquote(rest.split_whitespace().next().unwrap_or(""));
+    if name.is_empty() {
+        return Err("SET PASSWORD falta usuario".into());
+    }
+    // password = último token entre comillas o tras =/TO/A
+    let mut pwd = String::new();
+    if let Some(eq) = rest.find('=') {
+        pwd = unquote(&rest[eq + 1..]);
+    } else {
+        // buscar TO/A <pwd>
+        let toks: Vec<&str> = rest.split_whitespace().collect();
+        if toks.len() >= 3 {
+            pwd = unquote(toks[toks.len() - 1]);
+        }
+    }
+    let _ = up;
+    if pwd.is_empty() || pwd.eq_ignore_ascii_case(&name) {
+        return Err("SET PASSWORD falta nueva password".into());
+    }
+    Ok(LogicalPlan::SetPassword { name, new_password: pwd })
+}
+
+fn parse_add_member(rest: &str) -> Result<LogicalPlan, String> {
+    // `ana TO GROUP ventas` / `ana A GRUPO ventas`
+    let up = rest.to_uppercase();
+    let sep = [" TO GROUP ", " TO ROLE ", " A GRUPO ", " A ROL ", " EN GRUPO ", " EN ROL "]
+        .iter()
+        .find_map(|s| up.find(s).map(|i| (i, *s)));
+    let Some((idx, sep)) = sep else {
+        return Err("Sintaxis: ADD USER <usuario> TO GROUP <grupo> / AGREGA USUARIO <u> A GRUPO <g>".into());
+    };
+    let user = unquote(&rest[..idx]);
+    let group = unquote(&rest[idx + sep.len()..].split_whitespace().next().unwrap_or(""));
+    if user.is_empty() || group.is_empty() {
+        return Err("ADD USER requiere usuario y grupo".into());
+    }
+    Ok(LogicalPlan::AddMember { user, group })
+}
+
+fn parse_remove_member(rest: &str) -> Result<LogicalPlan, String> {
+    // `ana FROM GROUP ventas` / `ana DE GRUPO ventas`
+    let up = rest.to_uppercase();
+    let sep = [" FROM GROUP ", " FROM ROLE ", " DE GRUPO ", " DE ROL ", " DEL GRUPO "]
+        .iter()
+        .find_map(|s| up.find(s).map(|i| (i, *s)));
+    let Some((idx, sep)) = sep else {
+        return Err("Sintaxis: REMOVE USER <u> FROM GROUP <g> / QUITA USUARIO <u> DE GRUPO <g>".into());
+    };
+    let user = unquote(&rest[..idx]);
+    let group = unquote(&rest[idx + sep.len()..].split_whitespace().next().unwrap_or(""));
+    if user.is_empty() || group.is_empty() {
+        return Err("REMOVE USER requiere usuario y grupo".into());
+    }
+    Ok(LogicalPlan::RemoveMember { user, group })
+}
+
+fn parse_grant(sql: &str, is_revoke: bool) -> Result<LogicalPlan, String> {
+    // GRANT SELECT ON ventas.t TO USER ana | OTORGA SELECT EN ventas.t A USUARIO ana
+    // GRANT SELECT ON ventas.* TO GROUP vendedores | GRANT ADMIN TO USER root
+    let up = sql.to_uppercase();
+    let head_len = if !is_revoke {
+        if up.starts_with("GRANT ") { 6 } else if up.starts_with("OTORGAR ") { 8 } else { 7 }
+    } else if up.starts_with("REVOKE ") { 7 } else if up.starts_with("REVOCAR ") { 8 } else { 7 };
+    let body = sql[head_len..].trim();
+    let body_up = body.to_uppercase();
+    // Separar "<PRIV> ON <scope> TO <grantee>" — ON/EN es opcional para GLOBAL (ADMIN/CREATE_USER).
+    let (priv_part, after_on) = if let Some(i) = find_kw(body_up.as_str(), " ON ") {
+        (body[..i].trim(), body[i + 4..].trim())
+    } else if let Some(i) = find_kw(body_up.as_str(), " EN ") {
+        (body[..i].trim(), body[i + 4..].trim())
+    } else {
+        // Sin ON: "<PRIV> TO ..."  (global)
+        if let Some(i) = find_kw(body_up.as_str(), " TO ") {
+            (body[..i].trim(), body[i + 4..].trim())
+        } else if let Some(i) = find_kw(body_up.as_str(), " A ") {
+            (body[..i].trim(), body[i + 3..].trim())
+        } else {
+            return Err("Sintaxis: GRANT <PRIV> [ON base[.tabla]] TO USER|GROUP <nombre>".into());
+        }
+    };
+    let privilege = Privilege::parse(priv_part)
+        .ok_or_else(|| format!("Privilegio desconocido '{}'. Válidos: SELECT/INSERT/UPDATE/DELETE/SEARCH/CREATE_TABLE/ALTER_TABLE/DROP_TABLE/SHOW_TABLES/DESCRIBE_TABLE/CREATE_DATABASE/DROP_DATABASE/SHOW_DATABASES/USE_DATABASE/CREATE_USER/DROP_USER/GRANT/ADMIN", priv_part))?;
+    // after_on = "<scope> TO <grantee>" o directo "<TO ...>" si era global
+    let (scope_part, grantee_part) = if let Some(i) = find_kw(after_on.to_uppercase().as_str(), " TO ") {
+        (after_on[..i].trim(), after_on[i + 4..].trim())
+    } else if let Some(i) = find_kw(after_on.to_uppercase().as_str(), " A ") {
+        // Evitar confundir "A" dentro de nombres: exigir " A " con espacios; si scope vacío era global.
+        let left = after_on[..i].trim();
+        let right = after_on[i + 3..].trim();
+        if left.eq_ignore_ascii_case("USER") || left.eq_ignore_ascii_case("GROUP") || left.eq_ignore_ascii_case("USUARIO") || left.eq_ignore_ascii_case("GRUPO") {
+            ("", after_on.trim())
+        } else {
+            (left, right)
+        }
+    } else {
+        ("", after_on.trim())
+    };
+    let (db, table) = if scope_part.is_empty() || scope_part == "*" {
+        (None, None)
+    } else if scope_part.ends_with(".*") {
+        (Some(scope_part[..scope_part.len() - 2].to_string()), None)
+    } else if let Some(dot) = scope_part.find('.') {
+        let d = scope_part[..dot].trim();
+        let t = scope_part[dot + 1..].trim().trim_matches('*');
+        (Some(d.to_string()), if t.is_empty() || t == "*" { None } else { Some(t.to_string()) })
+    } else {
+        (Some(scope_part.to_string()), None)
+    };
+    // grantee: [USER|GROUP|USUARIO|GRUPO] <nombre>
+    let gup = grantee_part.to_uppercase();
+    let (is_group, name) = if gup.starts_with("GROUP ") {
+        (true, unquote(&grantee_part[6..]))
+    } else if gup.starts_with("GRUPO ") {
+        (true, unquote(&grantee_part[6..]))
+    } else if gup.starts_with("ROLE ") || gup.starts_with("ROL ") {
+        (true, unquote(&grantee_part[5..]))
+    } else if gup.starts_with("USER ") {
+        (false, unquote(&grantee_part[5..]))
+    } else if gup.starts_with("USUARIO ") {
+        (false, unquote(&grantee_part[8..]))
+    } else {
+        // Por defecto usuario.
+        (false, unquote(grantee_part.split_whitespace().next().unwrap_or("")))
+    };
+    if name.is_empty() {
+        return Err("GRANT/REVOKE requiere destinatario: TO USER|GROUP <nombre>".into());
+    }
+    let grantee = if is_group { Grantee::Group(name) } else { Grantee::User(name) };
+    if is_revoke {
+        Ok(LogicalPlan::Revoke { privilege, grantee, db, table })
+    } else {
+        Ok(LogicalPlan::Grant { privilege, grantee, db, table })
+    }
+}
+
+fn find_kw(hay_up: &str, needle_spaced: &str) -> Option<usize> {
+    hay_up.find(needle_spaced)
 }
 
 fn strip_create_table_prefix<'a>(sql: &'a str) -> Option<&'a str> {

@@ -1,5 +1,7 @@
 //! crates/aether-engine/src/lib.rs - Motor con Catalog + Parser + Executor
 #![allow(unused_variables, dead_code)]
+use argentum_common::auth::AuthCatalog;
+pub use argentum_common::auth::{Grantee, Privilege, SessionContext};
 use argentum_common::catalog::{Catalog, ColumnDef, DataType};
 use argentum_common::TxnId;
 use argentum_index::{SearchParams, TrinityIndex};
@@ -39,6 +41,19 @@ pub enum LogicalPlan {
     DropDatabase { name: String },
     UseDatabase { name: String },
     ShowDatabases,
+    // Seguridad empresarial: usuarios / grupos / grants estilo MySQL
+    CreateUser { name: String, password: String, superuser: bool },
+    DropUser { name: String },
+    SetPassword { name: String, new_password: String },
+    CreateGroup { name: String, description: String },
+    DropGroup { name: String },
+    AddMember { user: String, group: String },
+    RemoveMember { user: String, group: String },
+    Grant { privilege: Privilege, grantee: Grantee, db: Option<String>, table: Option<String> },
+    Revoke { privilege: Privilege, grantee: Grantee, db: Option<String>, table: Option<String> },
+    ShowUsers,
+    ShowGroups,
+    ShowGrants { grantee: Option<Grantee> },
     Insert { table: String, columns: Vec<String>, values: Vec<String> },
     Delete { table: String, where_clause: Option<String> },
     Update { table: String, assignments: Vec<(String, String)>, where_clause: Option<String> },
@@ -1070,17 +1085,20 @@ pub struct DatabaseManager {
     current_db: String,
     databases: HashMap<String, Arc<Database>>,
     manifest_path: String,
+    auth: AuthCatalog,
 }
 
 impl DatabaseManager {
     pub fn new(base_dir: &str) -> Self {
         let _ = std::fs::create_dir_all(base_dir);
         let manifest_path = format!("{}/databases.txt", base_dir.trim_end_matches('/'));
+        let auth_path = format!("{}/auth.json", base_dir.trim_end_matches('/'));
         let mut mgr = Self {
             base_dir: base_dir.to_string(),
             current_db: "default".to_string(),
             databases: HashMap::new(),
             manifest_path,
+            auth: AuthCatalog::with_persist(&auth_path),
         };
         // Asegurar que "default" exista siempre y esté listada.
         let _ = mgr.ensure_default();
@@ -1300,6 +1318,110 @@ impl DatabaseManager {
         } else {
             Vec::new()
         }
+    }
+
+    // -- Seguridad: auth + enforcement --
+
+    pub fn auth(&self) -> &AuthCatalog {
+        &self.auth
+    }
+
+    pub fn auth_mut(&mut self) -> &mut AuthCatalog {
+        &mut self.auth
+    }
+
+    pub fn authenticate(&self, user: &str, password: &str) -> Result<SessionContext, String> {
+        self.auth.authenticate(user, password)
+    }
+
+    /// Privilegio requerido por plan + tabla objetivo (si aplica).
+    /// Devuelve (privilegio, Option<tabla>). La base es la activa salvo
+    /// Create/Drop/Use/ShowDatabases que son globales o sobre la base nombrada.
+    pub fn required_for_plan(plan: &LogicalPlan) -> (Privilege, Option<String>) {
+        match plan {
+            LogicalPlan::CreateDatabase { .. } => (Privilege::CreateDatabase, None),
+            LogicalPlan::DropDatabase { .. } => (Privilege::DropDatabase, None),
+            LogicalPlan::ShowDatabases => (Privilege::ShowDatabases, None),
+            LogicalPlan::UseDatabase { .. } => (Privilege::UseDatabase, None),
+            LogicalPlan::CreateTable { table, .. } => (Privilege::CreateTable, Some(table.clone())),
+            LogicalPlan::AlterTableAddColumn { table, .. } | LogicalPlan::AlterTableDropColumn { table, .. } => {
+                (Privilege::AlterTable, Some(table.clone()))
+            }
+            LogicalPlan::DropTable { table } => (Privilege::DropTable, Some(table.clone())),
+            LogicalPlan::DescribeTable { table } => (Privilege::DescribeTable, Some(table.clone())),
+            LogicalPlan::ShowTables => (Privilege::ShowTables, None),
+            LogicalPlan::Insert { table, .. } => (Privilege::Insert, Some(table.clone())),
+            LogicalPlan::Delete { table, .. } => (Privilege::Delete, Some(table.clone())),
+            LogicalPlan::Update { table, .. } => (Privilege::Update, Some(table.clone())),
+            LogicalPlan::Select { table, is_search, .. } => {
+                if *is_search {
+                    (Privilege::Search, Some(table.clone()))
+                } else {
+                    (Privilege::Select, Some(table.clone()))
+                }
+            }
+            LogicalPlan::SeqScan { table } => (Privilege::Select, Some(table.clone())),
+            LogicalPlan::TrinityScan { table, .. } => (Privilege::Search, Some(table.clone())),
+            LogicalPlan::Limit { input, .. } => Self::required_for_plan(input),
+            LogicalPlan::Filter { input, .. } => Self::required_for_plan(input),
+            LogicalPlan::HashJoin { .. } => (Privilege::Select, None),
+            LogicalPlan::GraphTraverse { .. } => (Privilege::Select, None),
+            LogicalPlan::CreateUser { .. } => (Privilege::CreateUser, None),
+            LogicalPlan::DropUser { .. } => (Privilege::DropUser, None),
+            LogicalPlan::SetPassword { .. } => (Privilege::CreateUser, None),
+            LogicalPlan::CreateGroup { .. } | LogicalPlan::DropGroup { .. } => (Privilege::Admin, None),
+            LogicalPlan::AddMember { .. } | LogicalPlan::RemoveMember { .. } => (Privilege::Admin, None),
+            LogicalPlan::Grant { .. } | LogicalPlan::Revoke { .. } => (Privilege::Grant, None),
+            LogicalPlan::ShowUsers | LogicalPlan::ShowGroups | LogicalPlan::ShowGrants { .. } => {
+                (Privilege::ShowDatabases, None)
+            }
+        }
+    }
+
+    /// Verifica un plan contra la sesión. `db_override` permite chequear
+    /// USE/DROP sobre la base nombrada en vez de la activa.
+    pub fn check_plan(
+        &self,
+        session: &SessionContext,
+        plan: &LogicalPlan,
+    ) -> Result<(), String> {
+        let (priv_, table) = Self::required_for_plan(plan);
+        // Scope de base: por defecto la activa; para USE/DROP/CREATE se usa la nombrada o global.
+        let db_scope: Option<String> = match plan {
+            LogicalPlan::UseDatabase { name } | LogicalPlan::DropDatabase { name } => Some(name.to_lowercase()),
+            LogicalPlan::CreateDatabase { .. } | LogicalPlan::ShowDatabases => None,
+            _ => Some(self.current_db.clone()),
+        };
+        self.auth.check(
+            &session.username,
+            &priv_,
+            db_scope.as_deref(),
+            table.as_deref(),
+        )
+    }
+
+    /// Ejecuta el plan sobre la base activa previa verificación de privilegios.
+    /// Los planes de nivel base (Create/Drop/Use/ShowDatabases) los debe
+    /// ejecutar el llamador vía create/use/drop_database tras check_plan.
+    pub fn execute_current(
+        &self,
+        session: &SessionContext,
+        plan: LogicalPlan,
+    ) -> Result<ExecutionResult, String> {
+        self.check_plan(session, &plan)?;
+        match &plan {
+            LogicalPlan::CreateDatabase { .. }
+            | LogicalPlan::DropDatabase { .. }
+            | LogicalPlan::UseDatabase { .. }
+            | LogicalPlan::ShowDatabases => {
+                return Err("Plan de base: usar create/use/drop/show vía manager / use manager API".into());
+            }
+            _ => {}
+        }
+        let Some(db) = self.current() else {
+            return Err("No hay base activa / no current database".into());
+        };
+        db.execute(plan)
     }
 }
 

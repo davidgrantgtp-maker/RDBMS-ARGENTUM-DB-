@@ -60,6 +60,7 @@ impl From<std::io::Error> for AetherError {
     }
 }
 
+pub mod auth;
 pub mod catalog;
 
 pub type Result<T> = std::result::Result<T, AetherError>;
